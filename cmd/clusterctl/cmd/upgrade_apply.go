@@ -17,12 +17,14 @@ limitations under the License.
 package cmd
 
 import (
+	"context"
 	"time"
 
 	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
 
 	"sigs.k8s.io/cluster-api/cmd/clusterctl/client"
+	"sigs.k8s.io/cluster-api/cmd/clusterctl/cmd/internal/templates"
 )
 
 type upgradeApplyOptions struct {
@@ -45,7 +47,7 @@ var ua = &upgradeApplyOptions{}
 var upgradeApplyCmd = &cobra.Command{
 	Use:   "apply",
 	Short: "Apply new versions of Cluster API core and providers in a management cluster",
-	Long: LongDesc(`
+	Long: templates.LongDesc(`
 		The upgrade apply command applies new versions of Cluster API providers as defined by clusterctl upgrade plan.
 
 		New version should be applied ensuring all the providers uses the same cluster API version
@@ -53,7 +55,7 @@ var upgradeApplyCmd = &cobra.Command{
 
  		Specifying the provider using namespace/name:version is deprecated and will be dropped in a future release.`),
 
-	Example: Examples(`
+	Example: templates.Examples(`
 		# Upgrades all the providers in the management cluster to the latest version available which is compliant
 		# to the v1alpha4 API Version of Cluster API (contract).
 		clusterctl upgrade apply --contract v1alpha4
@@ -61,7 +63,7 @@ var upgradeApplyCmd = &cobra.Command{
 		# Upgrades only the aws provider to the v2.0.1 version.
 		clusterctl upgrade apply --infrastructure aws:v2.0.1`),
 	Args: cobra.NoArgs,
-	RunE: func(cmd *cobra.Command, args []string) error {
+	RunE: func(*cobra.Command, []string) error {
 		return runUpgradeApply()
 	},
 }
@@ -95,7 +97,9 @@ func init() {
 }
 
 func runUpgradeApply() error {
-	c, err := client.New(cfgFile)
+	ctx := context.Background()
+
+	c, err := client.New(ctx, cfgFile)
 	if err != nil {
 		return err
 	}
@@ -115,7 +119,7 @@ func runUpgradeApply() error {
 		return errors.New("The --contract flag can't be used in combination with --core, --bootstrap, --control-plane, --infrastructure, --ipam, --extension, --addon")
 	}
 
-	return c.ApplyUpgrade(client.ApplyUpgradeOptions{
+	return c.ApplyUpgrade(ctx, client.ApplyUpgradeOptions{
 		Kubeconfig:                client.Kubeconfig{Path: ua.kubeconfig, Context: ua.kubeconfigContext},
 		Contract:                  ua.contract,
 		CoreProvider:              ua.coreProvider,

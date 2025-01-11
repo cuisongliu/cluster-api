@@ -19,8 +19,9 @@ package cloudinit
 import (
 	"testing"
 
+	"github.com/blang/semver/v4"
 	. "github.com/onsi/gomega"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 
 	bootstrapv1 "sigs.k8s.io/cluster-api/bootstrap/kubeadm/api/v1beta1"
 	"sigs.k8s.io/cluster-api/util/certs"
@@ -141,8 +142,8 @@ func TestNewInitControlPlaneDiskMounts(t *testing.T) {
 					{
 						Device:    "test-device",
 						Layout:    true,
-						Overwrite: pointer.Bool(false),
-						TableType: pointer.String("gpt"),
+						Overwrite: ptr.To(false),
+						TableType: ptr.To("gpt"),
 					},
 				},
 				Filesystems: []bootstrapv1.Filesystem{
@@ -276,5 +277,41 @@ func TestNewJoinControlPlaneExperimentalRetry(t *testing.T) {
 	}
 	for _, f := range expectedFiles {
 		g.Expect(out).To(ContainSubstring(f))
+	}
+}
+
+func Test_useKubeadmBootstrapScriptPre1_31(t *testing.T) {
+	tests := []struct {
+		name          string
+		parsedversion semver.Version
+		want          bool
+	}{
+		{
+			name:          "true for version for v1.30",
+			parsedversion: semver.MustParse("1.30.99"),
+			want:          true,
+		},
+		{
+			name:          "true for version for v1.28",
+			parsedversion: semver.MustParse("1.28.0"),
+			want:          true,
+		},
+		{
+			name:          "false for v1.31.0",
+			parsedversion: semver.MustParse("1.31.0"),
+			want:          false,
+		},
+		{
+			name:          "false for v1.31.0-beta.0",
+			parsedversion: semver.MustParse("1.31.0-beta.0"),
+			want:          false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := useKubeadmBootstrapScriptPre1_31(tt.parsedversion); got != tt.want {
+				t.Errorf("useKubeadmBootstrapScriptPre1_31() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }

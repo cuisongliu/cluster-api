@@ -17,6 +17,7 @@ limitations under the License.
 package cluster
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -91,6 +92,10 @@ type node struct {
 	// E.g. for the cluster object we capture information to see if the cluster uses a manged topology
 	// and the cluster class used.
 	additionalInfo map[string]interface{}
+
+	// blockingMove is true when the object should prevent a move operation from proceeding as indicated by
+	// the presence of the block-move annotation.
+	blockingMove bool
 }
 
 type discoveryTypeInfo struct {
@@ -143,7 +148,7 @@ func (n *node) captureAdditionalInformation(obj *unstructured.Unstructured) erro
 			if n.additionalInfo == nil {
 				n.additionalInfo = map[string]interface{}{}
 			}
-			n.additionalInfo[clusterTopologyNameKey] = cluster.Spec.Topology.Class
+			n.additionalInfo[clusterTopologyNameKey] = cluster.GetClassKey().Name
 		}
 	}
 
@@ -319,15 +324,17 @@ func (o *objectGraph) objMetaToNode(obj *unstructured.Unstructured, n *node) {
 			n.isGlobal = true
 		}
 	}
+
+	_, n.blockingMove = obj.GetAnnotations()[clusterctlv1.BlockMoveAnnotation]
 }
 
 // getDiscoveryTypes returns the list of TypeMeta to be considered for the move discovery phase.
 // This list includes all the types defines by the CRDs installed by clusterctl and the ConfigMap/Secret core types.
-func (o *objectGraph) getDiscoveryTypes() error {
+func (o *objectGraph) getDiscoveryTypes(ctx context.Context) error {
 	crdList := &apiextensionsv1.CustomResourceDefinitionList{}
 	getDiscoveryTypesBackoff := newReadBackoff()
-	if err := retryWithExponentialBackoff(getDiscoveryTypesBackoff, func() error {
-		return getCRDList(o.proxy, crdList)
+	if err := retryWithExponentialBackoff(ctx, getDiscoveryTypesBackoff, func(ctx context.Context) error {
+		return getCRDList(ctx, o.proxy, crdList)
 	}); err != nil {
 		return err
 	}
@@ -397,8 +404,8 @@ func getKindAPIString(typeMeta metav1.TypeMeta) string {
 	return fmt.Sprintf("%ss.%s", strings.ToLower(typeMeta.Kind), api)
 }
 
-func getCRDList(proxy Proxy, crdList *apiextensionsv1.CustomResourceDefinitionList) error {
-	c, err := proxy.NewClient()
+func getCRDList(ctx context.Context, proxy Proxy, crdList *apiextensionsv1.CustomResourceDefinitionList) error {
+	c, err := proxy.NewClient(ctx)
 	if err != nil {
 		return err
 	}
@@ -411,7 +418,7 @@ func getCRDList(proxy Proxy, crdList *apiextensionsv1.CustomResourceDefinitionLi
 
 // Discovery reads all the Kubernetes objects existing in a namespace (or in all namespaces if empty) for the types received in input, and then adds
 // everything to the objects graph.
-func (o *objectGraph) Discovery(namespace string) error {
+func (o *objectGraph) Discovery(ctx context.Context, namespace string) error {
 	log := logf.Log
 	log.Info("Discovering Cluster API objects")
 
@@ -425,15 +432,15 @@ func (o *objectGraph) Discovery(namespace string) error {
 		typeMeta := discoveryType.typeMeta
 		objList := new(unstructured.UnstructuredList)
 
-		if err := retryWithExponentialBackoff(discoveryBackoff, func() error {
-			return getObjList(o.proxy, typeMeta, selectors, objList)
+		if err := retryWithExponentialBackoff(ctx, discoveryBackoff, func(ctx context.Context) error {
+			return getObjList(ctx, o.proxy, typeMeta, selectors, objList)
 		}); err != nil {
 			return err
 		}
 
 		// if we are discovering Secrets, also secrets from the providers namespace should be included.
-		if discoveryType.typeMeta.GetObjectKind().GroupVersionKind().GroupKind() == corev1.SchemeGroupVersion.WithKind("SecretList").GroupKind() {
-			providers, err := o.providerInventory.List()
+		if discoveryType.typeMeta.GetObjectKind().GroupVersionKind().GroupKind() == corev1.SchemeGroupVersion.WithKind("Secret").GroupKind() {
+			providers, err := o.providerInventory.List(ctx)
 			if err != nil {
 				return err
 			}
@@ -441,8 +448,8 @@ func (o *objectGraph) Discovery(namespace string) error {
 				if p.Type == string(clusterctlv1.InfrastructureProviderType) {
 					providerNamespaceSelector := []client.ListOption{client.InNamespace(p.Namespace)}
 					providerNamespaceSecretList := new(unstructured.UnstructuredList)
-					if err := retryWithExponentialBackoff(discoveryBackoff, func() error {
-						return getObjList(o.proxy, typeMeta, providerNamespaceSelector, providerNamespaceSecretList)
+					if err := retryWithExponentialBackoff(ctx, discoveryBackoff, func(ctx context.Context) error {
+						return getObjList(ctx, o.proxy, typeMeta, providerNamespaceSelector, providerNamespaceSecretList)
 					}); err != nil {
 						return err
 					}
@@ -455,7 +462,7 @@ func (o *objectGraph) Discovery(namespace string) error {
 			continue
 		}
 
-		log.V(5).Info(typeMeta.Kind, "Count", len(objList.Items))
+		log.V(5).Info(typeMeta.Kind, "count", len(objList.Items))
 		for i := range objList.Items {
 			obj := objList.Items[i]
 			if err := o.addObj(&obj); err != nil {
@@ -464,7 +471,7 @@ func (o *objectGraph) Discovery(namespace string) error {
 		}
 	}
 
-	log.V(1).Info("Total objects", "Count", len(o.uidToNode))
+	log.V(1).Info("Total objects", "count", len(o.uidToNode))
 
 	// Completes the graph by searching for soft ownership relations such as secrets linked to the cluster
 	// by a naming convention (without any explicit OwnerReference).
@@ -476,8 +483,8 @@ func (o *objectGraph) Discovery(namespace string) error {
 	return nil
 }
 
-func getObjList(proxy Proxy, typeMeta metav1.TypeMeta, selectors []client.ListOption, objList *unstructured.UnstructuredList) error {
-	c, err := proxy.NewClient()
+func getObjList(ctx context.Context, proxy Proxy, typeMeta metav1.TypeMeta, selectors []client.ListOption, objList *unstructured.UnstructuredList) error {
+	c, err := proxy.NewClient(ctx)
 	if err != nil {
 		return err
 	}

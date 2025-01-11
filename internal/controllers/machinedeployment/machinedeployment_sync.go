@@ -22,7 +22,6 @@ import (
 	"sort"
 	"time"
 
-	"github.com/go-logr/logr"
 	"github.com/pkg/errors"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -30,11 +29,9 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	kerrors "k8s.io/apimachinery/pkg/util/errors"
 	apirand "k8s.io/apimachinery/pkg/util/rand"
-	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -42,15 +39,14 @@ import (
 	"sigs.k8s.io/cluster-api/internal/controllers/machinedeployment/mdutil"
 	"sigs.k8s.io/cluster-api/internal/util/hash"
 	"sigs.k8s.io/cluster-api/internal/util/ssa"
-	"sigs.k8s.io/cluster-api/util"
 	"sigs.k8s.io/cluster-api/util/conditions"
 	"sigs.k8s.io/cluster-api/util/patch"
 )
 
 // sync is responsible for reconciling deployments on scaling events or when they
 // are paused.
-func (r *Reconciler) sync(ctx context.Context, md *clusterv1.MachineDeployment, msList []*clusterv1.MachineSet) error {
-	newMS, oldMSs, err := r.getAllMachineSetsAndSyncRevision(ctx, md, msList, false)
+func (r *Reconciler) sync(ctx context.Context, md *clusterv1.MachineDeployment, msList []*clusterv1.MachineSet, templateExists bool) error {
+	newMS, oldMSs, err := r.getAllMachineSetsAndSyncRevision(ctx, md, msList, false, templateExists)
 	if err != nil {
 		return err
 	}
@@ -80,12 +76,15 @@ func (r *Reconciler) sync(ctx context.Context, md *clusterv1.MachineDeployment, 
 //
 // Note that currently the deployment controller is using caches to avoid querying the server for reads.
 // This may lead to stale reads of machine sets, thus incorrect deployment status.
-func (r *Reconciler) getAllMachineSetsAndSyncRevision(ctx context.Context, md *clusterv1.MachineDeployment, msList []*clusterv1.MachineSet, createIfNotExisted bool) (*clusterv1.MachineSet, []*clusterv1.MachineSet, error) {
+func (r *Reconciler) getAllMachineSetsAndSyncRevision(ctx context.Context, md *clusterv1.MachineDeployment, msList []*clusterv1.MachineSet, createIfNotExisted, templateExists bool) (*clusterv1.MachineSet, []*clusterv1.MachineSet, error) {
 	reconciliationTime := metav1.Now()
-	allOldMSs := mdutil.FindOldMachineSets(md, msList, &reconciliationTime)
+	allOldMSs, err := mdutil.FindOldMachineSets(md, msList, &reconciliationTime)
+	if err != nil {
+		return nil, nil, err
+	}
 
 	// Get new machine set with the updated revision number
-	newMS, err := r.getNewMachineSet(ctx, md, msList, allOldMSs, createIfNotExisted, &reconciliationTime)
+	newMS, err := r.getNewMachineSet(ctx, md, msList, allOldMSs, createIfNotExisted, templateExists, &reconciliationTime)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -96,7 +95,7 @@ func (r *Reconciler) getAllMachineSetsAndSyncRevision(ctx context.Context, md *c
 // Returns a MachineSet that matches the intent of the given MachineDeployment.
 // If there does not exist such a MachineSet and createIfNotExisted is true, create a new MachineSet.
 // If there is already such a MachineSet, update it to propagate in-place mutable fields from the MachineDeployment.
-func (r *Reconciler) getNewMachineSet(ctx context.Context, md *clusterv1.MachineDeployment, msList, oldMSs []*clusterv1.MachineSet, createIfNotExists bool, reconciliationTime *metav1.Time) (*clusterv1.MachineSet, error) {
+func (r *Reconciler) getNewMachineSet(ctx context.Context, md *clusterv1.MachineDeployment, msList, oldMSs []*clusterv1.MachineSet, createIfNotExists, templateExists bool, reconciliationTime *metav1.Time) (*clusterv1.MachineSet, error) {
 	// Try to find a MachineSet which matches the MachineDeployments intent, while ignore diffs between
 	// the in-place mutable fields.
 	// If we find a matching MachineSet we just update it to propagate any changes to the in-place mutable
@@ -104,7 +103,10 @@ func (r *Reconciler) getNewMachineSet(ctx context.Context, md *clusterv1.Machine
 	// If we don't find a matching MachineSet, we need a rollout and thus create a new MachineSet.
 	// Note: The in-place mutable fields can be just updated inline, because they do not affect the actual machines
 	// themselves (i.e. the infrastructure and the software running on the Machines not the Machine object).
-	matchingMS := mdutil.FindNewMachineSet(md, msList, reconciliationTime)
+	matchingMS, createReason, err := mdutil.FindNewMachineSet(md, msList, reconciliationTime)
+	if err != nil {
+		return nil, err
+	}
 
 	// If there is a MachineSet that matches the intent of the MachineDeployment, update the MachineSet
 	// to propagate all in-place mutable fields from MachineDeployment to the MachineSet.
@@ -115,12 +117,7 @@ func (r *Reconciler) getNewMachineSet(ctx context.Context, md *clusterv1.Machine
 		}
 
 		// Ensure MachineDeployment has the latest MachineSet revision in its revision annotation.
-		err = r.updateMachineDeployment(ctx, md, func(innerDeployment *clusterv1.MachineDeployment) {
-			mdutil.SetDeploymentRevision(md, updatedMS.Annotations[clusterv1.RevisionAnnotation])
-		})
-		if err != nil {
-			return nil, errors.Wrap(err, "failed to update revision annotation on MachineDeployment")
-		}
+		mdutil.SetDeploymentRevision(md, updatedMS.Annotations[clusterv1.RevisionAnnotation])
 		return updatedMS, nil
 	}
 
@@ -128,19 +125,17 @@ func (r *Reconciler) getNewMachineSet(ctx context.Context, md *clusterv1.Machine
 		return nil, nil
 	}
 
+	if !templateExists {
+		return nil, errors.New("cannot create a new MachineSet when templates do not exist")
+	}
+
 	// Create a new MachineSet and wait until the new MachineSet exists in the cache.
-	newMS, err := r.createMachineSetAndWait(ctx, md, oldMSs)
+	newMS, err := r.createMachineSetAndWait(ctx, md, oldMSs, createReason)
 	if err != nil {
 		return nil, err
 	}
 
-	// Ensure MachineDeployment has the latest MachineSet revision in its revision annotation.
-	err = r.updateMachineDeployment(ctx, md, func(innerDeployment *clusterv1.MachineDeployment) {
-		mdutil.SetDeploymentRevision(md, newMS.Annotations[clusterv1.RevisionAnnotation])
-	})
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to update revision annotation on MachineDeployment")
-	}
+	mdutil.SetDeploymentRevision(md, newMS.Annotations[clusterv1.RevisionAnnotation])
 
 	return newMS, nil
 }
@@ -150,7 +145,7 @@ func (r *Reconciler) updateMachineSet(ctx context.Context, deployment *clusterv1
 	log := ctrl.LoggerFrom(ctx)
 
 	// Compute the desired MachineSet.
-	updatedMS, err := r.computeDesiredMachineSet(deployment, ms, oldMSs, log)
+	updatedMS, err := r.computeDesiredMachineSet(ctx, deployment, ms, oldMSs)
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to update MachineSet %q", klog.KObj(ms))
 	}
@@ -168,21 +163,26 @@ func (r *Reconciler) updateMachineSet(ctx context.Context, deployment *clusterv1
 
 // createMachineSetAndWait creates a new MachineSet with the desired intent of the MachineDeployment.
 // It waits for the cache to be updated with the newly created MachineSet.
-func (r *Reconciler) createMachineSetAndWait(ctx context.Context, deployment *clusterv1.MachineDeployment, oldMSs []*clusterv1.MachineSet) (*clusterv1.MachineSet, error) {
+func (r *Reconciler) createMachineSetAndWait(ctx context.Context, deployment *clusterv1.MachineDeployment, oldMSs []*clusterv1.MachineSet, createReason string) (*clusterv1.MachineSet, error) {
 	log := ctrl.LoggerFrom(ctx)
 
 	// Compute the desired MachineSet.
-	newMS, err := r.computeDesiredMachineSet(deployment, nil, oldMSs, log)
+	newMS, err := r.computeDesiredMachineSet(ctx, deployment, nil, oldMSs)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to create new MachineSet")
 	}
+
+	log = log.WithValues("MachineSet", klog.KObj(newMS))
+	ctx = ctrl.LoggerInto(ctx, log)
+
+	log.Info(fmt.Sprintf("Creating new MachineSet, %s", createReason))
 
 	// Create the MachineSet.
 	if err := ssa.Patch(ctx, r.Client, machineDeploymentManagerName, newMS); err != nil {
 		r.recorder.Eventf(deployment, corev1.EventTypeWarning, "FailedCreate", "Failed to create MachineSet %s: %v", klog.KObj(newMS), err)
 		return nil, errors.Wrapf(err, "failed to create new MachineSet %s", klog.KObj(newMS))
 	}
-	log.V(4).Info("Created new MachineSet", "MachineSet", klog.KObj(newMS))
+	log.V(4).Info("Created new MachineSet")
 	r.recorder.Eventf(deployment, corev1.EventTypeNormal, "SuccessfulCreate", "Created MachineSet %s", klog.KObj(newMS))
 
 	// Keep trying to get the MachineSet. This will force the cache to update and prevent any future reconciliation of
@@ -213,7 +213,7 @@ func (r *Reconciler) createMachineSetAndWait(ctx context.Context, deployment *cl
 // There are small differences in how we calculate the MachineSet depending on if it
 // is a create or update. Example: for a new MachineSet we have to calculate a new name,
 // while for an existing MachineSet we have to use the name of the existing MachineSet.
-func (r *Reconciler) computeDesiredMachineSet(deployment *clusterv1.MachineDeployment, existingMS *clusterv1.MachineSet, oldMSs []*clusterv1.MachineSet, log logr.Logger) (*clusterv1.MachineSet, error) {
+func (r *Reconciler) computeDesiredMachineSet(ctx context.Context, deployment *clusterv1.MachineDeployment, existingMS *clusterv1.MachineSet, oldMSs []*clusterv1.MachineSet) (*clusterv1.MachineSet, error) {
 	var name string
 	var uid types.UID
 	var finalizers []string
@@ -240,14 +240,9 @@ func (r *Reconciler) computeDesiredMachineSet(deployment *clusterv1.MachineDeplo
 		// Append a random string at the end of template hash. This is required to distinguish MachineSets that
 		// could be created with the same spec as a result of rolloutAfter. If not, computeDesiredMachineSet
 		// will end up updating the existing MachineSet instead of creating a new one.
-		uniqueIdentifierLabelValue = fmt.Sprintf("%d-%s", templateHash, apirand.String(5))
-
-		name = computeNewMachineSetName(deployment.Name+"-", apirand.SafeEncodeString(uniqueIdentifierLabelValue))
-
-		// Add foregroundDeletion finalizer to MachineSet if the MachineDeployment has it.
-		if sets.New[string](deployment.Finalizers...).Has(metav1.FinalizerDeleteDependents) {
-			finalizers = []string{metav1.FinalizerDeleteDependents}
-		}
+		var randomSuffix string
+		name, randomSuffix = computeNewMachineSetName(deployment.Name + "-")
+		uniqueIdentifierLabelValue = fmt.Sprintf("%d-%s", templateHash, randomSuffix)
 
 		replicas, err = mdutil.NewMSNewReplicas(deployment, oldMSs, 0)
 		if err != nil {
@@ -271,15 +266,8 @@ func (r *Reconciler) computeDesiredMachineSet(deployment *clusterv1.MachineDeplo
 		name = existingMS.Name
 		uid = existingMS.UID
 
-		// Keep foregroundDeletion finalizer if the existingMS has it.
-		// Note: This case is a little different from the create case. In the update case we preserve
-		// the finalizer on the MachineSet if it already exists. Because of SSA we should not build
-		// the finalizer information from the MachineDeployment when updating a MachineSet because that could lead
-		// to dropping the finalizer from the MachineSet if it is dropped from the MachineDeployment.
-		// We should not drop the finalizer on the MachineSet if the finalizer is dropped form the MachineDeployment.
-		if sets.New[string](existingMS.Finalizers...).Has(metav1.FinalizerDeleteDependents) {
-			finalizers = []string{metav1.FinalizerDeleteDependents}
-		}
+		// Preserve all existing finalizers (including foregroundDeletion finalizer).
+		finalizers = existingMS.Finalizers
 
 		replicas = *existingMS.Spec.Replicas
 
@@ -328,18 +316,19 @@ func (r *Reconciler) computeDesiredMachineSet(deployment *clusterv1.MachineDeplo
 	desiredMS.Spec.Selector = *mdutil.CloneSelectorAndAddLabel(&deployment.Spec.Selector, clusterv1.MachineDeploymentUniqueLabel, uniqueIdentifierLabelValue)
 
 	// Set annotations and .spec.template.annotations.
-	if desiredMS.Annotations, err = mdutil.ComputeMachineSetAnnotations(log, deployment, oldMSs, existingMS); err != nil {
+	if desiredMS.Annotations, err = mdutil.ComputeMachineSetAnnotations(ctx, deployment, oldMSs, existingMS); err != nil {
 		return nil, errors.Wrap(err, "failed to compute desired MachineSet: failed to compute annotations")
 	}
 	desiredMS.Spec.Template.Annotations = cloneStringMap(deployment.Spec.Template.Annotations)
 
 	// Set all other in-place mutable fields.
-	desiredMS.Spec.MinReadySeconds = pointer.Int32Deref(deployment.Spec.MinReadySeconds, 0)
+	desiredMS.Spec.MinReadySeconds = ptr.Deref(deployment.Spec.MinReadySeconds, 0)
 	if deployment.Spec.Strategy != nil && deployment.Spec.Strategy.RollingUpdate != nil {
-		desiredMS.Spec.DeletePolicy = pointer.StringDeref(deployment.Spec.Strategy.RollingUpdate.DeletePolicy, "")
+		desiredMS.Spec.DeletePolicy = ptr.Deref(deployment.Spec.Strategy.RollingUpdate.DeletePolicy, "")
 	} else {
 		desiredMS.Spec.DeletePolicy = ""
 	}
+	desiredMS.Spec.Template.Spec.ReadinessGates = deployment.Spec.Template.Spec.ReadinessGates
 	desiredMS.Spec.Template.Spec.NodeDrainTimeout = deployment.Spec.Template.Spec.NodeDrainTimeout
 	desiredMS.Spec.Template.Spec.NodeDeletionTimeout = deployment.Spec.Template.Spec.NodeDeletionTimeout
 	desiredMS.Spec.Template.Spec.NodeVolumeDetachTimeout = deployment.Spec.Template.Spec.NodeVolumeDetachTimeout
@@ -366,11 +355,12 @@ const (
 // the upstream SimpleNameGenerator.
 // Note: We had to extract the logic as we want to use the MachineSet name suffix as
 // unique identifier for the MachineSet.
-func computeNewMachineSetName(base, suffix string) string {
+func computeNewMachineSetName(base string) (string, string) {
 	if len(base) > maxGeneratedNameLength {
 		base = base[:maxGeneratedNameLength]
 	}
-	return fmt.Sprintf("%s%s", base, suffix)
+	r := apirand.String(randomLength)
+	return fmt.Sprintf("%s%s", base, r), r
 }
 
 // scale scales proportionally in order to mitigate risk. Otherwise, scaling up can increase the size
@@ -499,6 +489,20 @@ func (r *Reconciler) syncDeploymentStatus(allMSs []*clusterv1.MachineSet, newMS 
 	} else {
 		conditions.MarkFalse(md, clusterv1.MachineDeploymentAvailableCondition, clusterv1.WaitingForAvailableMachinesReason, clusterv1.ConditionSeverityWarning, "Minimum availability requires %d replicas, current %d available", minReplicasNeeded, md.Status.AvailableReplicas)
 	}
+
+	if newMS != nil {
+		// Report a summary of current status of the MachineSet object owned by this MachineDeployment.
+		conditions.SetMirror(md, clusterv1.MachineSetReadyCondition,
+			newMS,
+			conditions.WithFallbackValue(false, clusterv1.WaitingForMachineSetFallbackReason, clusterv1.ConditionSeverityInfo, ""),
+		)
+	} else {
+		conditions.MarkFalse(md, clusterv1.MachineSetReadyCondition, clusterv1.WaitingForMachineSetFallbackReason, clusterv1.ConditionSeverityInfo, "MachineSet not found")
+	}
+
+	// Set v1beta replica counters on MD status.
+	setReplicas(md, allMSs)
+
 	return nil
 }
 
@@ -527,6 +531,9 @@ func calculateStatus(allMSs []*clusterv1.MachineSet, newMS *clusterv1.MachineSet
 		AvailableReplicas:   availableReplicas,
 		UnavailableReplicas: unavailableReplicas,
 		Conditions:          deployment.Status.Conditions,
+
+		// preserve v1beta2 status
+		V1Beta2: deployment.Status.V1Beta2,
 	}
 
 	if *deployment.Spec.Replicas == status.ReadyReplicas {
@@ -621,7 +628,7 @@ func (r *Reconciler) cleanupDeployment(ctx context.Context, oldMSs []*clusterv1.
 	sort.Sort(mdutil.MachineSetsByCreationTimestamp(cleanableMSes))
 	log.V(4).Info("Looking to cleanup old machine sets for deployment")
 
-	for i := int32(0); i < diff; i++ {
+	for i := range diff {
 		ms := cleanableMSes[i]
 		if ms.Spec.Replicas == nil {
 			return errors.Errorf("spec replicas for machine set %v is nil, this is unexpected", ms.Name)
@@ -632,7 +639,7 @@ func (r *Reconciler) cleanupDeployment(ctx context.Context, oldMSs []*clusterv1.
 			continue
 		}
 
-		log.V(4).Info("Trying to cleanup machine set for deployment", "machineset", ms.Name)
+		log.V(4).Info("Trying to cleanup machine set for deployment", "MachineSet", klog.KObj(ms))
 		if err := r.Client.Delete(ctx, ms); err != nil && !apierrors.IsNotFound(err) {
 			// Return error instead of aggregating and continuing DELETEs on the theory
 			// that we may be overloading the api server.
@@ -643,28 +650,4 @@ func (r *Reconciler) cleanupDeployment(ctx context.Context, oldMSs []*clusterv1.
 	}
 
 	return nil
-}
-
-func (r *Reconciler) updateMachineDeployment(ctx context.Context, md *clusterv1.MachineDeployment, modify func(*clusterv1.MachineDeployment)) error {
-	return updateMachineDeployment(ctx, r.Client, md, modify)
-}
-
-// We have this as standalone variant to be able to use it from the tests.
-func updateMachineDeployment(ctx context.Context, c client.Client, md *clusterv1.MachineDeployment, modify func(*clusterv1.MachineDeployment)) error {
-	mdObjectKey := util.ObjectKey(md)
-	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
-		// Note: We intentionally don't re-use the passed in MachineDeployment md here as that would
-		// overwrite any local changes we might have previously made to the MachineDeployment with the version
-		// we get here from the apiserver.
-		md := &clusterv1.MachineDeployment{}
-		if err := c.Get(ctx, mdObjectKey, md); err != nil {
-			return err
-		}
-		patchHelper, err := patch.NewHelper(md, c)
-		if err != nil {
-			return err
-		}
-		modify(md)
-		return patchHelper.Patch(ctx, md)
-	})
 }

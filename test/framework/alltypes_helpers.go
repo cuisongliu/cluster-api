@@ -23,16 +23,18 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -44,8 +46,9 @@ import (
 
 // GetCAPIResourcesInput is the input for GetCAPIResources.
 type GetCAPIResourcesInput struct {
-	Lister    Lister
-	Namespace string
+	Lister       Lister
+	Namespace    string
+	IncludeTypes []metav1.TypeMeta
 }
 
 // GetCAPIResources reads all the CAPI resources in a namespace.
@@ -56,16 +59,20 @@ func GetCAPIResources(ctx context.Context, input GetCAPIResourcesInput) []*unstr
 	Expect(input.Namespace).NotTo(BeEmpty(), "input.Namespace is required for GetCAPIResources")
 
 	types := getClusterAPITypes(ctx, input.Lister)
+	types.Insert(input.IncludeTypes...)
 
 	objList := []*unstructured.Unstructured{}
-	for i := range types {
-		typeMeta := types[i]
+	for _, typ := range types.UnsortedList() {
 		typeList := new(unstructured.UnstructuredList)
-		typeList.SetAPIVersion(typeMeta.APIVersion)
-		typeList.SetKind(typeMeta.Kind)
+		typeList.SetAPIVersion(typ.APIVersion)
+		typeList.SetKind(typ.Kind)
 
 		if err := input.Lister.List(ctx, typeList, client.InNamespace(input.Namespace)); err != nil {
 			if apierrors.IsNotFound(err) {
+				continue
+			}
+			if apierrors.IsForbidden(err) {
+				fmt.Printf("Warning: failed to list %s resources due to a rbac issue: %v", typeList.GroupVersionKind(), err)
 				continue
 			}
 			Fail(fmt.Sprintf("failed to list %q resources: %v", typeList.GroupVersionKind(), err))
@@ -81,8 +88,8 @@ func GetCAPIResources(ctx context.Context, input GetCAPIResourcesInput) []*unstr
 
 // getClusterAPITypes returns the list of TypeMeta to be considered for the move discovery phase.
 // This list includes all the types belonging to CAPI providers.
-func getClusterAPITypes(ctx context.Context, lister Lister) []metav1.TypeMeta {
-	discoveredTypes := []metav1.TypeMeta{}
+func getClusterAPITypes(ctx context.Context, lister Lister) sets.Set[metav1.TypeMeta] {
+	discoveredTypes := sets.New[metav1.TypeMeta]()
 
 	crdList := &apiextensionsv1.CustomResourceDefinitionList{}
 	Eventually(func() error {
@@ -95,7 +102,7 @@ func getClusterAPITypes(ctx context.Context, lister Lister) []metav1.TypeMeta {
 				continue
 			}
 
-			discoveredTypes = append(discoveredTypes, metav1.TypeMeta{
+			discoveredTypes.Insert(metav1.TypeMeta{
 				Kind: crd.Spec.Names.Kind,
 				APIVersion: metav1.GroupVersion{
 					Group:   crd.Spec.Group,
@@ -109,9 +116,10 @@ func getClusterAPITypes(ctx context.Context, lister Lister) []metav1.TypeMeta {
 
 // DumpAllResourcesInput is the input for DumpAllResources.
 type DumpAllResourcesInput struct {
-	Lister    Lister
-	Namespace string
-	LogPath   string
+	Lister       Lister
+	Namespace    string
+	LogPath      string
+	IncludeTypes []metav1.TypeMeta
 }
 
 // DumpAllResources dumps Cluster API related resources to YAML
@@ -122,8 +130,9 @@ func DumpAllResources(ctx context.Context, input DumpAllResourcesInput) {
 	Expect(input.Namespace).NotTo(BeEmpty(), "input.Namespace is required for DumpAllResources")
 
 	resources := GetCAPIResources(ctx, GetCAPIResourcesInput{
-		Lister:    input.Lister,
-		Namespace: input.Namespace,
+		Lister:       input.Lister,
+		Namespace:    input.Namespace,
+		IncludeTypes: input.IncludeTypes,
 	})
 
 	for i := range resources {
@@ -132,38 +141,64 @@ func DumpAllResources(ctx context.Context, input DumpAllResourcesInput) {
 	}
 }
 
-// DumpKubeSystemPodsForClusterInput is the input for DumpKubeSystemPodsForCluster.
-type DumpKubeSystemPodsForClusterInput struct {
-	Lister  Lister
-	LogPath string
-	Cluster *clusterv1.Cluster
+// DumpNamespaceAndGVK specifies a GVK and namespace to be dumped.
+type DumpNamespaceAndGVK struct {
+	GVK       schema.GroupVersionKind
+	Namespace string
 }
 
-// DumpKubeSystemPodsForCluster dumps kube-system Pods to YAML.
-func DumpKubeSystemPodsForCluster(ctx context.Context, input DumpKubeSystemPodsForClusterInput) {
-	Expect(ctx).NotTo(BeNil(), "ctx is required for DumpAllResources")
-	Expect(input.Lister).NotTo(BeNil(), "input.Lister is required for DumpAllResources")
-	Expect(input.Cluster).NotTo(BeNil(), "input.Cluster is required for DumpAllResources")
+// DumpResourcesForClusterInput is the input for DumpResourcesForCluster.
+type DumpResourcesForClusterInput struct {
+	Lister    Lister
+	LogPath   string
+	Cluster   *clusterv1.Cluster
+	Resources []DumpNamespaceAndGVK
+}
 
-	// Note: We intentionally retrieve Pods as Unstructured because we need the Pods as Unstructured for dumpObject.
-	podList := new(unstructured.UnstructuredList)
-	podList.SetAPIVersion(corev1.SchemeGroupVersion.String())
-	podList.SetKind("Pod")
-	var listErr error
-	_ = wait.PollUntilContextTimeout(ctx, retryableOperationInterval, retryableOperationTimeout, true, func(ctx context.Context) (bool, error) {
-		if listErr = input.Lister.List(ctx, podList, client.InNamespace(metav1.NamespaceSystem)); listErr != nil {
-			return false, nil //nolint:nilerr
+// DumpResourcesForCluster dumps specified resources to yaml.
+func DumpResourcesForCluster(ctx context.Context, input DumpResourcesForClusterInput) {
+	Expect(ctx).NotTo(BeNil(), "ctx is required for DumpResourcesForCluster")
+	Expect(input.Lister).NotTo(BeNil(), "input.Lister is required for DumpResourcesForCluster")
+	Expect(input.Cluster).NotTo(BeNil(), "input.Cluster is required for DumpResourcesForCluster")
+
+	for _, resource := range input.Resources {
+		resourceList := new(unstructured.UnstructuredList)
+		resourceList.SetGroupVersionKind(resource.GVK)
+
+		var i int
+		var listErr error
+		_ = wait.PollUntilContextTimeout(ctx, retryableOperationInterval, retryableOperationTimeout, true, func(ctx context.Context) (bool, error) {
+			if listErr = input.Lister.List(ctx, resourceList, client.InNamespace(resource.Namespace)); listErr != nil {
+				// Fail fast for well known network errors that most likely won't recover.
+				// e.g This error happens when the control plane endpoint for the workload cluster can't be reached from
+				// the machine where the E2E test runs.
+				if strings.HasSuffix(listErr.Error(), "connect: no route to host") {
+					return true, nil
+				}
+				// e.g This error happens when the API server for the workload cluster is down or the control plane endpoint
+				// can't be reached from the machine where the E2E test runs.
+				// NOTE: we consider this error won't recover after it happens at least 3 times in a row
+				if strings.HasSuffix(listErr.Error(), "i/o timeout") {
+					i++
+					if i >= 3 {
+						return true, nil
+					}
+					return false, nil
+				}
+
+				i = 0
+				return false, nil
+			}
+			return true, nil
+		})
+		if listErr != nil {
+			// NB. we are treating failures in collecting resources as a non-blocking operation (best effort)
+			fmt.Printf("Failed to list %s for Cluster %s: %v\n", resource.GVK.Kind, klog.KObj(input.Cluster), listErr)
+			continue
 		}
-		return true, nil
-	})
-	if listErr != nil {
-		// NB. we are treating failures in collecting kube-system pods as a non-blocking operation (best effort)
-		fmt.Printf("Failed to list Pods in kube-system for Cluster %s: %v\n", klog.KObj(input.Cluster), listErr)
-		return
-	}
-
-	for i := range podList.Items {
-		dumpObject(&podList.Items[i], input.LogPath)
+		for i := range resourceList.Items {
+			dumpObject(&resourceList.Items[i], input.LogPath)
+		}
 	}
 }
 

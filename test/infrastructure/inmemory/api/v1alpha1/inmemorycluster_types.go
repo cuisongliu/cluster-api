@@ -23,8 +23,9 @@ import (
 )
 
 const (
-	// ResourceGroupAnnotationName tracks the name of a resource group a InMemoryCluster cluster is linked to.
-	ResourceGroupAnnotationName = "inmemorycluster.infrastructure.cluster.x-k8s.io/resource-group"
+	// ListenerAnnotationName tracks the name of the listener a cluster is linked to.
+	// NOTE: the annotation must be added by the components that creates the listener only if using the HotRestart feature.
+	ListenerAnnotationName = "inmemorycluster.infrastructure.cluster.x-k8s.io/listener"
 
 	// ClusterFinalizer allows InMemoryClusterReconciler to clean up resources associated with InMemoryCluster before
 	// removing it from the API server.
@@ -47,6 +48,21 @@ type InMemoryClusterStatus struct {
 	// Conditions defines current service state of the InMemoryCluster.
 	// +optional
 	Conditions clusterv1.Conditions `json:"conditions,omitempty"`
+
+	// v1beta2 groups all the fields that will be added or modified in InMemoryCluster's status with the V1Beta2 version.
+	// +optional
+	V1Beta2 *InMemoryClusterV1Beta2Status `json:"v1beta2,omitempty"`
+}
+
+// InMemoryClusterV1Beta2Status groups all the fields that will be added or modified in InMemoryCluster with the V1Beta2 version.
+// See https://github.com/kubernetes-sigs/cluster-api/blob/main/docs/proposals/20240916-improve-status-in-CAPI-resources.md for more context.
+type InMemoryClusterV1Beta2Status struct {
+	// conditions represents the observations of a InMemoryCluster's current state.
+	// +optional
+	// +listType=map
+	// +listMapKey=type
+	// +kubebuilder:validation:MaxItems=32
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
 // APIEndpoint represents a reachable Kubernetes API endpoint.
@@ -85,6 +101,22 @@ func (c *InMemoryCluster) SetConditions(conditions clusterv1.Conditions) {
 	c.Status.Conditions = conditions
 }
 
+// GetV1Beta2Conditions returns the set of conditions for this object.
+func (c *InMemoryCluster) GetV1Beta2Conditions() []metav1.Condition {
+	if c.Status.V1Beta2 == nil {
+		return nil
+	}
+	return c.Status.V1Beta2.Conditions
+}
+
+// SetV1Beta2Conditions sets conditions for an API object.
+func (c *InMemoryCluster) SetV1Beta2Conditions(conditions []metav1.Condition) {
+	if c.Status.V1Beta2 == nil {
+		c.Status.V1Beta2 = &InMemoryClusterV1Beta2Status{}
+	}
+	c.Status.V1Beta2.Conditions = conditions
+}
+
 // +kubebuilder:object:root=true
 
 // InMemoryClusterList contains a list of InMemoryCluster.
@@ -95,5 +127,5 @@ type InMemoryClusterList struct {
 }
 
 func init() {
-	SchemeBuilder.Register(&InMemoryCluster{}, &InMemoryClusterList{})
+	objectTypes = append(objectTypes, &InMemoryCluster{}, &InMemoryClusterList{})
 }

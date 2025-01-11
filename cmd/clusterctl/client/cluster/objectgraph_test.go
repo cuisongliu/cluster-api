@@ -17,6 +17,7 @@ limitations under the License.
 package cluster
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"testing"
@@ -31,7 +32,7 @@ import (
 
 	clusterctlv1 "sigs.k8s.io/cluster-api/cmd/clusterctl/api/v1alpha3"
 	"sigs.k8s.io/cluster-api/cmd/clusterctl/internal/test"
-	"sigs.k8s.io/cluster-api/internal/test/builder"
+	"sigs.k8s.io/cluster-api/util/test/builder"
 )
 
 func TestObjectGraph_getDiscoveryTypeMetaList(t *testing.T) {
@@ -221,8 +222,10 @@ func TestObjectGraph_getDiscoveryTypeMetaList(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			g := NewWithT(t)
 
+			ctx := context.Background()
+
 			graph := newObjectGraph(tt.fields.proxy, nil)
-			err := graph.getDiscoveryTypes()
+			err := graph.getDiscoveryTypes(ctx)
 			if tt.wantErr {
 				g.Expect(err).To(HaveOccurred())
 				return
@@ -1040,7 +1043,6 @@ var objectGraphsTests = []struct {
 		},
 		want: wantGraph{
 			nodes: map[string]wantGraphItem{
-
 				"infrastructure.cluster.x-k8s.io/v1beta1, Kind=GenericInfrastructureMachineTemplate, ns1/shared": {
 					owners: []string{
 						"cluster.x-k8s.io/v1beta1, Kind=Cluster, ns1/cluster1",
@@ -1635,7 +1637,6 @@ var objectGraphsTests = []struct {
 				// We need to deduplicate objects here as the clusterclasses share objects and
 				// setting up the test server panics if we try to create it with duplicate objects.
 				return deduplicateObjects(objs)
-
 			}(),
 		},
 		want: wantGraph{
@@ -1771,33 +1772,23 @@ func getFakeProxyWithCRDs() *test.FakeProxy {
 	return proxy
 }
 
-func getFakeDiscoveryTypes(graph *objectGraph) error {
-	if err := graph.getDiscoveryTypes(); err != nil {
-		return err
-	}
-
-	// Given that the Fake client behaves in a different way than real client, for this test we are required to add the List suffix to all the types.
-	for _, discoveryType := range graph.types {
-		discoveryType.typeMeta.Kind = fmt.Sprintf("%sList", discoveryType.typeMeta.Kind)
-	}
-	return nil
-}
-
 func TestObjectGraph_Discovery(t *testing.T) {
 	// NB. we are testing the graph is properly built starting from objects (TestGraphBuilder_addObj_WithFakeObjects) or from the same objects read from the cluster (this test).
 	for _, tt := range objectGraphsTests {
 		t.Run(tt.name, func(t *testing.T) {
 			g := NewWithT(t)
 
+			ctx := context.Background()
+
 			// Create an objectGraph bound to a source cluster with all the CRDs for the types involved in the test.
 			graph := getObjectGraphWithObjs(tt.args.objs)
 
 			// Get all the types to be considered for discovery
-			err := getFakeDiscoveryTypes(graph)
+			err := graph.getDiscoveryTypes(ctx)
 			g.Expect(err).ToNot(HaveOccurred())
 
 			// finally test discovery
-			err = graph.Discovery("")
+			err = graph.Discovery(ctx, "")
 			if tt.wantErr {
 				g.Expect(err).To(HaveOccurred())
 				return
@@ -1814,7 +1805,7 @@ func TestObjectGraph_DiscoveryByNamespace(t *testing.T) {
 		namespace string
 		objs      []client.Object
 	}
-	var tests = []struct {
+	tests := []struct {
 		name    string
 		args    args
 		want    wantGraph
@@ -1945,15 +1936,17 @@ func TestObjectGraph_DiscoveryByNamespace(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			g := NewWithT(t)
 
+			ctx := context.Background()
+
 			// Create an objectGraph bound to a source cluster with all the CRDs for the types involved in the test.
 			graph := getObjectGraphWithObjs(tt.args.objs)
 
 			// Get all the types to be considered for discovery
-			err := getFakeDiscoveryTypes(graph)
+			err := graph.getDiscoveryTypes(ctx)
 			g.Expect(err).ToNot(HaveOccurred())
 
 			// finally test discovery
-			err = graph.Discovery(tt.args.namespace)
+			err = graph.Discovery(ctx, tt.args.namespace)
 			if tt.wantErr {
 				g.Expect(err).To(HaveOccurred())
 				return

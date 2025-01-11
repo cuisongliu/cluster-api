@@ -17,12 +17,14 @@ limitations under the License.
 package cmd
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
 
 	"sigs.k8s.io/cluster-api/cmd/clusterctl/client"
+	"sigs.k8s.io/cluster-api/cmd/clusterctl/cmd/internal/templates"
 )
 
 type generateClusterOptions struct {
@@ -51,7 +53,7 @@ var gc = &generateClusterOptions{}
 var generateClusterClusterCmd = &cobra.Command{
 	Use:   "cluster NAME",
 	Short: "Generate templates for creating workload clusters",
-	Long: LongDesc(`
+	Long: templates.LongDesc(`
 		Generate templates for creating workload clusters.
 
 		clusterctl ships with a list of known providers; if necessary, edit
@@ -60,7 +62,7 @@ var generateClusterClusterCmd = &cobra.Command{
 		Each provider configuration links to a repository; clusterctl uses this information
 		to fetch templates when creating a new cluster.`),
 
-	Example: Examples(`
+	Example: templates.Examples(`
 		# Generates a yaml file for creating workload clusters using
 		# the pre-installed infrastructure and bootstrap providers.
 		clusterctl generate cluster my-cluster
@@ -91,7 +93,7 @@ var generateClusterClusterCmd = &cobra.Command{
 		# Prints the list of variables required by the yaml file for creating workload cluster.
 		clusterctl generate cluster my-cluster --list-variables`),
 
-	Args: func(cmd *cobra.Command, args []string) error {
+	Args: func(_ *cobra.Command, args []string) error {
 		if len(args) != 1 {
 			return errors.New("please specify a cluster name")
 		}
@@ -115,8 +117,9 @@ func init() {
 		"The Kubernetes version to use for the workload cluster. If unspecified, the value from OS environment variables or the $XDG_CONFIG_HOME/cluster-api/clusterctl.yaml config file will be used.")
 	generateClusterClusterCmd.Flags().Int64Var(&gc.controlPlaneMachineCount, "control-plane-machine-count", 1,
 		"The number of control plane machines for the workload cluster.")
+	// Remove default from hard coded text if the default is ever changed from 0 since cobra would then add it
 	generateClusterClusterCmd.Flags().Int64Var(&gc.workerMachineCount, "worker-machine-count", 0,
-		"The number of worker machines for the workload cluster.")
+		"The number of worker machines for the workload cluster. (default 0)")
 
 	// flags for the repository source
 	generateClusterClusterCmd.Flags().StringVarP(&gc.infrastructureProvider, "infrastructure", "i", "",
@@ -145,7 +148,9 @@ func init() {
 }
 
 func runGenerateClusterTemplate(cmd *cobra.Command, name string) error {
-	c, err := client.New(cfgFile)
+	ctx := context.Background()
+
+	c, err := client.New(ctx, cfgFile)
 	if err != nil {
 		return err
 	}
@@ -186,7 +191,7 @@ func runGenerateClusterTemplate(cmd *cobra.Command, name string) error {
 		}
 	}
 
-	template, err := c.GetClusterTemplate(templateOptions)
+	template, err := c.GetClusterTemplate(ctx, templateOptions)
 	if err != nil {
 		return err
 	}

@@ -32,7 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apiserver/pkg/admission/plugin/webhook/testcerts"
 	utilfeature "k8s.io/component-base/featuregate/testing"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -41,15 +41,15 @@ import (
 	runtimecatalog "sigs.k8s.io/cluster-api/exp/runtime/catalog"
 	runtimehooksv1 "sigs.k8s.io/cluster-api/exp/runtime/hooks/api/v1alpha1"
 	"sigs.k8s.io/cluster-api/feature"
-	runtimeclient "sigs.k8s.io/cluster-api/internal/runtime/client"
+	internalruntimeclient "sigs.k8s.io/cluster-api/internal/runtime/client"
 	runtimeregistry "sigs.k8s.io/cluster-api/internal/runtime/registry"
 	fakev1alpha1 "sigs.k8s.io/cluster-api/internal/runtime/test/v1alpha1"
 	"sigs.k8s.io/cluster-api/util"
 )
 
 func TestExtensionReconciler_Reconcile(t *testing.T) {
-	defer utilfeature.SetFeatureGateDuringTest(t, feature.Gates, feature.ClusterTopology, true)()
-	defer utilfeature.SetFeatureGateDuringTest(t, feature.Gates, feature.RuntimeSDK, true)()
+	utilfeature.SetFeatureGateDuringTest(t, feature.Gates, feature.ClusterTopology, true)
+	utilfeature.SetFeatureGateDuringTest(t, feature.Gates, feature.RuntimeSDK, true)
 
 	g := NewWithT(t)
 	ns, err := env.CreateNamespace(ctx, "test-extension-config")
@@ -59,7 +59,7 @@ func TestExtensionReconciler_Reconcile(t *testing.T) {
 	g.Expect(fakev1alpha1.AddToCatalog(cat)).To(Succeed())
 
 	registry := runtimeregistry.New()
-	runtimeClient := runtimeclient.New(runtimeclient.Options{
+	runtimeClient := internalruntimeclient.New(internalruntimeclient.Options{
 		Catalog:  cat,
 		Registry: registry,
 	})
@@ -89,7 +89,7 @@ func TestExtensionReconciler_Reconcile(t *testing.T) {
 	defer func() {
 		g.Expect(env.CleanupAndWait(ctx, extensionConfig)).To(Succeed())
 	}()
-	t.Run("fail reconcile if registry has not been warmed up", func(t *testing.T) {
+	t.Run("fail reconcile if registry has not been warmed up", func(*testing.T) {
 		// Attempt to reconcile. This will be an error as the registry has not been warmed up at this point.
 		res, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: util.ObjectKey(extensionConfig)})
 		g.Expect(err).ToNot(HaveOccurred())
@@ -97,7 +97,7 @@ func TestExtensionReconciler_Reconcile(t *testing.T) {
 		g.Expect(res.Requeue).To(BeTrue())
 	})
 
-	t.Run("successful reconcile and discovery on ExtensionConfig create", func(t *testing.T) {
+	t.Run("successful reconcile and discovery on ExtensionConfig create", func(*testing.T) {
 		// Warm up the registry before trying reconciliation again.
 		warmup := &warmupRunnable{
 			Client:        env.GetClient(),
@@ -132,7 +132,7 @@ func TestExtensionReconciler_Reconcile(t *testing.T) {
 		g.Expect(err).ToNot(HaveOccurred())
 	})
 
-	t.Run("Successful reconcile and discovery on Extension update", func(t *testing.T) {
+	t.Run("Successful reconcile and discovery on Extension update", func(*testing.T) {
 		// Start a new ExtensionServer where the second handler is removed.
 		updatedServer, err := fakeSecureExtensionServer(discoveryHandler("first", "third"))
 		g.Expect(err).ToNot(HaveOccurred())
@@ -185,7 +185,7 @@ func TestExtensionReconciler_Reconcile(t *testing.T) {
 		_, err = registry.Get("second.ext1")
 		g.Expect(err).To(HaveOccurred())
 	})
-	t.Run("Successful reconcile and deregister on ExtensionConfig delete", func(t *testing.T) {
+	t.Run("Successful reconcile and deregister on ExtensionConfig delete", func(*testing.T) {
 		g.Expect(env.CleanupAndWait(ctx, extensionConfig)).To(Succeed())
 		_, err = r.Reconcile(ctx, ctrl.Request{NamespacedName: util.ObjectKey(extensionConfig)})
 		g.Expect(env.Get(ctx, util.ObjectKey(extensionConfig), extensionConfig)).To(Not(Succeed()))
@@ -197,13 +197,13 @@ func TestExtensionReconciler_Reconcile(t *testing.T) {
 }
 
 func TestExtensionReconciler_discoverExtensionConfig(t *testing.T) {
-	defer utilfeature.SetFeatureGateDuringTest(t, feature.Gates, feature.ClusterTopology, true)()
-	defer utilfeature.SetFeatureGateDuringTest(t, feature.Gates, feature.RuntimeSDK, true)()
+	utilfeature.SetFeatureGateDuringTest(t, feature.Gates, feature.ClusterTopology, true)
+	utilfeature.SetFeatureGateDuringTest(t, feature.Gates, feature.RuntimeSDK, true)
 	g := NewWithT(t)
 	ns, err := env.CreateNamespace(ctx, "test-runtime-extension")
 	g.Expect(err).ToNot(HaveOccurred())
 
-	t.Run("test discovery of a single extension", func(t *testing.T) {
+	t.Run("test discovery of a single extension", func(*testing.T) {
 		cat := runtimecatalog.New()
 		g.Expect(fakev1alpha1.AddToCatalog(cat)).To(Succeed())
 
@@ -214,7 +214,7 @@ func TestExtensionReconciler_discoverExtensionConfig(t *testing.T) {
 		g.Expect(err).ToNot(HaveOccurred())
 		defer srv1.Close()
 
-		runtimeClient := runtimeclient.New(runtimeclient.Options{
+		runtimeClient := internalruntimeclient.New(internalruntimeclient.Options{
 			Catalog:  cat,
 			Registry: registry,
 		})
@@ -237,7 +237,7 @@ func TestExtensionReconciler_discoverExtensionConfig(t *testing.T) {
 		g.Expect(conditions[0].Status).To(Equal(corev1.ConditionTrue))
 		g.Expect(conditions[0].Type).To(Equal(runtimev1.RuntimeExtensionDiscoveredCondition))
 	})
-	t.Run("fail discovery for non-running extension", func(t *testing.T) {
+	t.Run("fail discovery for non-running extension", func(*testing.T) {
 		cat := runtimecatalog.New()
 		g.Expect(fakev1alpha1.AddToCatalog(cat)).To(Succeed())
 		registry := runtimeregistry.New()
@@ -248,7 +248,7 @@ func TestExtensionReconciler_discoverExtensionConfig(t *testing.T) {
 		// srv1 := fakeSecureExtensionServer(discoveryHandler("first"))
 		// defer srv1.Close()
 
-		runtimeClient := runtimeclient.New(runtimeclient.Options{
+		runtimeClient := internalruntimeclient.New(internalruntimeclient.Options{
 			Catalog:  cat,
 			Registry: registry,
 		})
@@ -359,7 +359,7 @@ func discoveryHandler(handlerList ...string) func(http.ResponseWriter, *http.Req
 		panic(err)
 	}
 
-	return func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(respBody)
 	}
@@ -378,7 +378,7 @@ func fakeExtensionConfigForURL(namespace, name, url string) *runtimev1.Extension
 		},
 		Spec: runtimev1.ExtensionConfigSpec{
 			ClientConfig: runtimev1.ClientConfig{
-				URL: pointer.String(url),
+				URL: ptr.To(url),
 			},
 			NamespaceSelector: nil,
 		},

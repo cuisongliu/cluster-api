@@ -37,7 +37,7 @@ package kind
 import (
 	"fmt"
 
-	"github.com/blang/semver"
+	"github.com/blang/semver/v4"
 
 	clusterapicontainer "sigs.k8s.io/cluster-api/util/container"
 )
@@ -79,8 +79,254 @@ type Mapping struct {
 var preBuiltMappings = []Mapping{
 
 	// TODO: Add pre-built images for newer Kind versions on top
+	// Pre-built images for Kind v1.26.
+	{
+		KubernetesVersion: semver.MustParse("1.32.0"),
+		Mode:              Mode0_20,
+		Image:             "kindest/node:v1.32.0@sha256:c48c62eac5da28cdadcf560d1d8616cfa6783b58f0d94cf63ad1bf49600cb027",
+	},
+	{
+		KubernetesVersion: semver.MustParse("1.31.4"),
+		Mode:              Mode0_20,
+		Image:             "kindest/node:v1.31.4@sha256:2cb39f7295fe7eafee0842b1052a599a4fb0f8bcf3f83d96c7f4864c357c6c30",
+	},
+	{
+		KubernetesVersion: semver.MustParse("1.30.8"),
+		Mode:              Mode0_20,
+		Image:             "kindest/node:v1.30.8@sha256:17cd608b3971338d9180b00776cb766c50d0a0b6b904ab4ff52fd3fc5c6369bf",
+	},
+	{
+		KubernetesVersion: semver.MustParse("1.29.12"),
+		Mode:              Mode0_20,
+		Image:             "kindest/node:v1.29.12@sha256:62c0672ba99a4afd7396512848d6fc382906b8f33349ae68fb1dbfe549f70dec",
+	},
+
+	// Pre-built images for Kind v1.25.
+	{
+		KubernetesVersion: semver.MustParse("1.32.0"),
+		Mode:              Mode0_20,
+		Image:             "kindest/node:v1.32.0@sha256:2458b423d635d7b01637cac2d6de7e1c1dca1148a2ba2e90975e214ca849e7cb",
+	},
+	{
+		KubernetesVersion: semver.MustParse("1.31.2"),
+		Mode:              Mode0_20,
+		Image:             "kindest/node:v1.31.2@sha256:18fbefc20a7113353c7b75b5c869d7145a6abd6269154825872dc59c1329912e",
+	},
+	{
+		KubernetesVersion: semver.MustParse("1.30.6"),
+		Mode:              Mode0_20,
+		Image:             "kindest/node:v1.30.6@sha256:b6d08db72079ba5ae1f4a88a09025c0a904af3b52387643c285442afb05ab994",
+	},
+	{
+		KubernetesVersion: semver.MustParse("1.29.10"),
+		Mode:              Mode0_20,
+		Image:             "kindest/node:v1.29.10@sha256:3b2d8c31753e6c8069d4fc4517264cd20e86fd36220671fb7d0a5855103aa84b",
+	},
+	{
+		KubernetesVersion: semver.MustParse("1.28.15"),
+		Mode:              Mode0_20,
+		Image:             "kindest/node:v1.28.15@sha256:a7c05c7ae043a0b8c818f5a06188bc2c4098f6cb59ca7d1856df00375d839251",
+	},
+	{
+		KubernetesVersion: semver.MustParse("1.27.16"),
+		Mode:              Mode0_20,
+		Image:             "kindest/node:v1.27.16@sha256:2d21a61643eafc439905e18705b8186f3296384750a835ad7a005dceb9546d20",
+	},
+	{
+		KubernetesVersion: semver.MustParse("1.26.15"),
+		Mode:              Mode0_20,
+		Image:             "kindest/node:v1.26.15@sha256:c79602a44b4056d7e48dc20f7504350f1e87530fe953428b792def00bc1076dd",
+	},
+
+	// Pre-built images for Kind v1.24.
+	{
+		KubernetesVersion: semver.MustParse("1.31.0"),
+		Mode:              Mode0_20,
+		Image:             "kindest/node:v1.31.0@sha256:53df588e04085fd41ae12de0c3fe4c72f7013bba32a20e7325357a1ac94ba865",
+	},
+	{
+		KubernetesVersion: semver.MustParse("1.30.4"),
+		Mode:              Mode0_20,
+		Image:             "kindest/node:v1.30.4@sha256:976ea815844d5fa93be213437e3ff5754cd599b040946b5cca43ca45c2047114",
+	},
+	{
+		KubernetesVersion: semver.MustParse("1.30.3"),
+		Mode:              Mode0_20,
+		Image:             "kindest/node:v1.30.3@sha256:bf91e1ef2f7d92bb7734b2b896b3dddea98f0496b34d96e37dd5d7df331b7e56",
+	},
+	{
+		KubernetesVersion: semver.MustParse("1.29.8"),
+		Mode:              Mode0_20,
+		Image:             "kindest/node:v1.29.8@sha256:d46b7aa29567e93b27f7531d258c372e829d7224b25e3fc6ffdefed12476d3aa",
+	},
+	{
+		KubernetesVersion: semver.MustParse("1.29.7"),
+		Mode:              Mode0_20,
+		Image:             "kindest/node:v1.29.7@sha256:f70ab5d833fca132a100c1f95490be25d76188b053f49a3c0047ff8812360baf",
+	},
+	{
+		KubernetesVersion: semver.MustParse("1.28.13"),
+		Mode:              Mode0_20,
+		Image:             "kindest/node:v1.28.13@sha256:45d319897776e11167e4698f6b14938eb4d52eb381d9e3d7a9086c16c69a8110",
+	},
+	{
+		KubernetesVersion: semver.MustParse("1.28.12"),
+		Mode:              Mode0_20,
+		Image:             "kindest/node:v1.28.12@sha256:fa0e48b1e83bb8688a5724aa7eebffbd6337abd7909ad089a2700bf08c30c6ea",
+	},
+	{
+		KubernetesVersion: semver.MustParse("1.27.16"),
+		Mode:              Mode0_20,
+		Image:             "kindest/node:v1.27.17@sha256:3fd82731af34efe19cd54ea5c25e882985bafa2c9baefe14f8deab1737d9fabe",
+	},
+	{
+		KubernetesVersion: semver.MustParse("1.26.15"),
+		Mode:              Mode0_20,
+		Image:             "kindest/node:v1.26.15@sha256:1cc15d7b1edd2126ef051e359bf864f37bbcf1568e61be4d2ed1df7a3e87b354",
+	},
+	{
+		KubernetesVersion: semver.MustParse("1.25.16"),
+		Mode:              Mode0_20,
+		Image:             "kindest/node:v1.25.16@sha256:6110314339b3b44d10da7d27881849a87e092124afab5956f2e10ecdb463b025",
+	},
+
+	// Pre-built images for Kind v1.23.
+	{
+		KubernetesVersion: semver.MustParse("1.30.0"),
+		Mode:              Mode0_20,
+		Image:             "kindest/node:v1.30.0@sha256:047357ac0cfea04663786a612ba1eaba9702bef25227a794b52890dd8bcd692e",
+	},
+	{
+		KubernetesVersion: semver.MustParse("1.29.4"),
+		Mode:              Mode0_20,
+		Image:             "kindest/node:v1.29.4@sha256:3abb816a5b1061fb15c6e9e60856ec40d56b7b52bcea5f5f1350bc6e2320b6f8",
+	},
+	{
+		KubernetesVersion: semver.MustParse("1.28.9"),
+		Mode:              Mode0_20,
+		Image:             "kindest/node:v1.28.9@sha256:dca54bc6a6079dd34699d53d7d4ffa2e853e46a20cd12d619a09207e35300bd0",
+	},
+	{
+		KubernetesVersion: semver.MustParse("1.27.13"),
+		Mode:              Mode0_20,
+		Image:             "kindest/node:v1.27.13@sha256:17439fa5b32290e3ead39ead1250dca1d822d94a10d26f1981756cd51b24b9d8",
+	},
+	{
+		KubernetesVersion: semver.MustParse("1.26.15"),
+		Mode:              Mode0_20,
+		Image:             "kindest/node:v1.26.15@sha256:84333e26cae1d70361bb7339efb568df1871419f2019c80f9a12b7e2d485fe19",
+	},
+	{
+		KubernetesVersion: semver.MustParse("1.25.16"),
+		Mode:              Mode0_20,
+		Image:             "kindest/node:v1.25.16@sha256:5da57dfc290ac3599e775e63b8b6c49c0c85d3fec771cd7d55b45fae14b38d3b",
+	},
+
+	// Pre-built images for Kind v1.22.
+	{
+		KubernetesVersion: semver.MustParse("1.29.2"),
+		Mode:              Mode0_20,
+		Image:             "kindest/node:v1.29.2@sha256:51a1434a5397193442f0be2a297b488b6c919ce8a3931be0ce822606ea5ca245",
+	},
+	{
+		KubernetesVersion: semver.MustParse("1.29.1"),
+		Mode:              Mode0_20,
+		Image:             "kindest/node:v1.29.1@sha256:0c06baa545c3bb3fbd4828eb49b8b805f6788e18ce67bff34706ffa91866558b",
+	},
+	{
+		KubernetesVersion: semver.MustParse("1.28.7"),
+		Mode:              Mode0_20,
+		Image:             "kindest/node:v1.28.7@sha256:9bc6c451a289cf96ad0bbaf33d416901de6fd632415b076ab05f5fa7e4f65c58",
+	},
+	{
+		KubernetesVersion: semver.MustParse("1.28.6"),
+		Mode:              Mode0_20,
+		Image:             "kindest/node:v1.28.6@sha256:e9e59d321795595d0eed0de48ef9fbda50388dc8bd4a9b23fb9bd869f370ec7e",
+	},
+	{
+		KubernetesVersion: semver.MustParse("1.27.11"),
+		Mode:              Mode0_20,
+		Image:             "kindest/node:v1.27.11@sha256:681253009e68069b8e01aad36a1e0fa8cf18bb0ab3e5c4069b2e65cafdd70843",
+	},
+	{
+		KubernetesVersion: semver.MustParse("1.27.10"),
+		Mode:              Mode0_20,
+		Image:             "kindest/node:v1.27.10@sha256:e6b2f72f22a4de7b957cd5541e519a8bef3bae7261dd30c6df34cd9bdd3f8476",
+	},
+	{
+		KubernetesVersion: semver.MustParse("1.26.14"),
+		Mode:              Mode0_20,
+		Image:             "kindest/node:v1.26.14@sha256:5d548739ddef37b9318c70cb977f57bf3e5015e4552be4e27e57280a8cbb8e4f",
+	},
+	{
+		KubernetesVersion: semver.MustParse("1.26.13"),
+		Mode:              Mode0_20,
+		Image:             "kindest/node:v1.26.13@sha256:8cb4239d64ff897e0c21ad19fe1d68c3422d4f3c1c1a734b7ab9ccc76c549605",
+	},
+	{
+		KubernetesVersion: semver.MustParse("1.25.16"),
+		Mode:              Mode0_20,
+		Image:             "kindest/node:v1.25.16@sha256:e8b50f8e06b44bb65a93678a65a26248fae585b3d3c2a669e5ca6c90c69dc519",
+	},
+	{
+		KubernetesVersion: semver.MustParse("1.24.17"),
+		Mode:              Mode0_20,
+		Image:             "kindest/node:v1.24.17@sha256:bad10f9b98d54586cba05a7eaa1b61c6b90bfc4ee174fdc43a7b75ca75c95e51",
+	},
+	{
+		KubernetesVersion: semver.MustParse("1.23.17"),
+		Mode:              Mode0_20,
+		Image:             "kindest/node:v1.23.17@sha256:14d0a9a892b943866d7e6be119a06871291c517d279aedb816a4b4bc0ec0a5b3",
+	},
+
+	// Pre-built images for Kind v1.21.
+	{
+		KubernetesVersion: semver.MustParse("1.29.1"),
+		Mode:              Mode0_20,
+		Image:             "kindest/node:v1.29.1@sha256:a0cc28af37cf39b019e2b448c54d1a3f789de32536cb5a5db61a49623e527144",
+	},
+	{
+		KubernetesVersion: semver.MustParse("1.28.6"),
+		Mode:              Mode0_20,
+		Image:             "kindest/node:v1.28.6@sha256:b7e1cf6b2b729f604133c667a6be8aab6f4dde5bb042c1891ae248d9154f665b",
+	},
+	{
+		KubernetesVersion: semver.MustParse("1.27.10"),
+		Mode:              Mode0_20,
+		Image:             "kindest/node:v1.27.10@sha256:3700c811144e24a6c6181065265f69b9bf0b437c45741017182d7c82b908918f",
+	},
+	{
+		KubernetesVersion: semver.MustParse("1.26.13"),
+		Mode:              Mode0_20,
+		Image:             "kindest/node:v1.26.13@sha256:15ae92d507b7d4aec6e8920d358fc63d3b980493db191d7327541fbaaed1f789",
+	},
+	{
+		KubernetesVersion: semver.MustParse("1.25.16"),
+		Mode:              Mode0_20,
+		Image:             "kindest/node:v1.25.16@sha256:9d0a62b55d4fe1e262953be8d406689b947668626a357b5f9d0cfbddbebbc727",
+	},
+	{
+		KubernetesVersion: semver.MustParse("1.24.17"),
+		Mode:              Mode0_20,
+		Image:             "kindest/node:v1.24.17@sha256:ea292d57ec5dd0e2f3f5a2d77efa246ac883c051ff80e887109fabefbd3125c7",
+	},
+	{
+		KubernetesVersion: semver.MustParse("1.23.17"),
+		Mode:              Mode0_20,
+		Image:             "kindest/node:v1.23.17@sha256:fbb92ac580fce498473762419df27fa8664dbaa1c5a361b5957e123b4035bdcf",
+	},
 
 	// Pre-built images for Kind v1.20.
+	{
+		KubernetesVersion: semver.MustParse("1.29.0"),
+		Mode:              Mode0_20,
+		Image:             "kindest/node:v1.29.0@sha256:eaa1450915475849a73a9227b8f201df25e55e268e5d619312131292e324d570",
+	},
+	{
+		KubernetesVersion: semver.MustParse("1.28.0"),
+		Mode:              Mode0_20,
+		Image:             "kindest/node:v1.28.0@sha256:b7a4cad12c197af3ba43202d3efe03246b3f0793f162afb40a33c923952d5b31",
+	},
 	{
 		KubernetesVersion: semver.MustParse("1.27.3"),
 		Mode:              Mode0_20,
@@ -273,8 +519,8 @@ func GetMapping(k8sVersion semver.Version, customImage string) Mapping {
 			continue
 		}
 
-		// If the mapping is for the same patch version, return it
-		if k8sVersion.Patch == m.KubernetesVersion.Patch {
+		// If the mapping is for the same patch version and no pre version is defined, return it
+		if k8sVersion.Patch == m.KubernetesVersion.Patch && len(k8sVersion.Pre) == 0 {
 			return Mapping{
 				KubernetesVersion: m.KubernetesVersion,
 				Mode:              m.Mode,

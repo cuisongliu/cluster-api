@@ -71,7 +71,7 @@ func TestUnmarshalJSON(t *testing.T) {
 			} else {
 				g.Expect(err).ToNot(HaveOccurred())
 			}
-			g.Expect(newbts).To(Equal(rt.bts))
+			g.Expect(newbts).To(BeComparableTo(rt.bts))
 		})
 	}
 }
@@ -98,7 +98,7 @@ func roundtrip(input string, bts *BootstrapTokenString) error {
 	var err error
 	newbts := &BootstrapTokenString{}
 	// If string input was specified, roundtrip like this: string -> (unmarshal) -> object -> (marshal) -> string
-	if len(input) > 0 {
+	if input != "" {
 		if err := json.Unmarshal([]byte(input), newbts); err != nil {
 			return errors.Wrap(err, "expected no unmarshal error, got error")
 		}
@@ -182,7 +182,7 @@ func TestNewBootstrapTokenString(t *testing.T) {
 			} else {
 				g.Expect(err).ToNot(HaveOccurred())
 			}
-			g.Expect(actual).To(Equal(rt.bts))
+			g.Expect(actual).To(BeComparableTo(rt.bts))
 		})
 	}
 }
@@ -217,7 +217,7 @@ func TestNewBootstrapTokenStringFromIDAndSecret(t *testing.T) {
 			} else {
 				g.Expect(err).ToNot(HaveOccurred())
 			}
-			g.Expect(actual).To(Equal(rt.bts))
+			g.Expect(actual).To(BeComparableTo(rt.bts))
 		})
 	}
 }

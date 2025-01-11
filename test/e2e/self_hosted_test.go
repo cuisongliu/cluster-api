@@ -21,21 +21,8 @@ package e2e
 
 import (
 	. "github.com/onsi/ginkgo/v2"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 )
-
-var _ = Describe("When testing Cluster API working on self-hosted clusters", func() {
-	SelfHostedSpec(ctx, func() SelfHostedSpecInput {
-		return SelfHostedSpecInput{
-			E2EConfig:              e2eConfig,
-			ClusterctlConfigPath:   clusterctlConfigPath,
-			BootstrapClusterProxy:  bootstrapClusterProxy,
-			ArtifactFolder:         artifactFolder,
-			SkipCleanup:            skipCleanup,
-			InfrastructureProvider: pointer.String("docker"),
-		}
-	})
-})
 
 var _ = Describe("When testing Cluster API working on self-hosted clusters using ClusterClass [ClusterClass]", func() {
 	SelfHostedSpec(ctx, func() SelfHostedSpecInput {
@@ -46,9 +33,9 @@ var _ = Describe("When testing Cluster API working on self-hosted clusters using
 			ArtifactFolder:           artifactFolder,
 			SkipCleanup:              skipCleanup,
 			Flavor:                   "topology",
-			InfrastructureProvider:   pointer.String("docker"),
-			ControlPlaneMachineCount: pointer.Int64(1),
-			WorkerMachineCount:       pointer.Int64(1),
+			InfrastructureProvider:   ptr.To("docker"),
+			ControlPlaneMachineCount: ptr.To[int64](1),
+			WorkerMachineCount:       ptr.To[int64](1),
 		}
 	})
 })
@@ -62,9 +49,9 @@ var _ = Describe("When testing Cluster API working on self-hosted clusters using
 			ArtifactFolder:           artifactFolder,
 			SkipCleanup:              skipCleanup,
 			Flavor:                   "topology",
-			InfrastructureProvider:   pointer.String("docker"),
-			ControlPlaneMachineCount: pointer.Int64(3),
-			WorkerMachineCount:       pointer.Int64(1),
+			InfrastructureProvider:   ptr.To("docker"),
+			ControlPlaneMachineCount: ptr.To[int64](3),
+			WorkerMachineCount:       ptr.To[int64](1),
 		}
 	})
 })
@@ -77,10 +64,11 @@ var _ = Describe("When testing Cluster API working on single-node self-hosted cl
 			BootstrapClusterProxy:    bootstrapClusterProxy,
 			ArtifactFolder:           artifactFolder,
 			SkipCleanup:              skipCleanup,
-			Flavor:                   "topology-single-node-cluster",
-			InfrastructureProvider:   pointer.String("docker"),
-			ControlPlaneMachineCount: pointer.Int64(1),
-			WorkerMachineCount:       pointer.Int64(0),
+			Flavor:                   "topology-no-workers",
+			InfrastructureProvider:   ptr.To("docker"),
+			ControlPlaneMachineCount: ptr.To[int64](1),
+			// Note: the used template is not using the corresponding variable.
+			WorkerMachineCount: ptr.To[int64](0),
 		}
 	})
 })

@@ -9,7 +9,7 @@ It can be used to:
 
 ## Provider repositories
 
-The `clusterctl` CLI is designed to work with providers implementing the [clusterctl Provider Contract](provider-contract.md).
+The `clusterctl` CLI is designed to work with providers implementing the [clusterctl Provider Contract](../developer/providers/contracts/clusterctl.md).
 
 Each provider is expected to define a provider repository, a well-known place where release assets are published.
 
@@ -39,7 +39,7 @@ providers:
     type: "BootstrapProvider"
 ```
 
-See [provider contract](provider-contract.md) for instructions about how to set up a provider repository.
+See [provider contract](../developer/providers/contracts/clusterctl.md) for instructions about how to set up a provider repository.
 
 **Note**: It is possible to use the `${HOME}` and `${CLUSTERCTL_REPOSITORY_PATH}` environment variables in `url`.
 
@@ -58,6 +58,9 @@ variables in the `clusterctl` config file:
 # Values for environment variable substitution
 AWS_B64ENCODED_CREDENTIALS: XXXXXXXX
 ```
+
+The format of keys should always be `UPPERCASE_WITH_UNDERSCORE` for both OS environment variables and in the `clusterctl`
+config file (NOTE: this limitation derives from [Viper](https://github.com/spf13/viper), the library we are using internally to retrieve variables).
 
 In case a variable is defined both in the config file and as an OS environment variable,
 the environment variable takes precedence.
@@ -97,7 +100,7 @@ The value string is a possibly signed sequence of decimal numbers, each with opt
 
 If no value is specified, or the format is invalid, the default value of 10 minutes will be used.
 
-Please note that the configuration above will be considered also when doing `clusterctl upgrade plan` or `clusterctl upgrade plan`.
+Please note that the configuration above will be considered also when doing `clusterctl upgrade plan` or `clusterctl upgrade apply`.
 
 ## Migrating to user-managed cert-manager
 

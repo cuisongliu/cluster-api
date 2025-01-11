@@ -99,7 +99,6 @@ func TestControlPlaneInitMutex_Lock(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			gs := NewWithT(t)
 
@@ -176,7 +175,7 @@ func TestControlPlaneInitMutex_LockWithMachineDeletion(t *testing.T) {
 		},
 	}
 	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
+		t.Run(tc.name, func(*testing.T) {
 			l := &ControlPlaneInitMutex{
 				client: tc.client,
 			}
@@ -259,7 +258,6 @@ func TestControlPlaneInitMutex_UnLock(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			gs := NewWithT(t)
 

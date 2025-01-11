@@ -13,13 +13,17 @@ rules:
   - list
   - watch
 - apiGroups:
-  - cluster.x-k8s.io
+  - authentication.k8s.io
   resources:
-  - clusters
+  - tokenreviews
   verbs:
-  - get
-  - list
-  - watch
+  - create
+- apiGroups:
+  - authorization.k8s.io
+  resources:
+  - subjectaccessreviews
+  verbs:
+  - create
 - apiGroups:
   - cluster.x-k8s.io
   resources:
@@ -34,6 +38,7 @@ rules:
   - infrastructure.cluster.x-k8s.io
   resources:
   - inmemoryclusters
+  - inmemorymachines
   verbs:
   - create
   - delete
@@ -47,25 +52,6 @@ rules:
   resources:
   - inmemoryclusters/finalizers
   - inmemoryclusters/status
-  verbs:
-  - get
-  - patch
-  - update
-- apiGroups:
-  - infrastructure.cluster.x-k8s.io
-  resources:
-  - inmemorymachines
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - infrastructure.cluster.x-k8s.io
-  resources:
   - inmemorymachines/finalizers
   - inmemorymachines/status
   verbs:

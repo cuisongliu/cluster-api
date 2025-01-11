@@ -18,21 +18,25 @@ package machinedeployment
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/pkg/errors"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	kerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
 	"sigs.k8s.io/cluster-api/internal/controllers/topology/machineset"
-	tlog "sigs.k8s.io/cluster-api/internal/log"
 	"sigs.k8s.io/cluster-api/util"
 	"sigs.k8s.io/cluster-api/util/annotations"
+	"sigs.k8s.io/cluster-api/util/finalizers"
+	"sigs.k8s.io/cluster-api/util/labels"
 	"sigs.k8s.io/cluster-api/util/patch"
 	"sigs.k8s.io/cluster-api/util/predicates"
 )
@@ -55,14 +59,38 @@ type Reconciler struct {
 }
 
 func (r *Reconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manager, options controller.Options) error {
-	err := ctrl.NewControllerManagedBy(mgr).
-		For(&clusterv1.MachineDeployment{}).
+	if r.Client == nil || r.APIReader == nil {
+		return errors.New("Client and APIReader must not be nil")
+	}
+
+	predicateLog := ctrl.LoggerFrom(ctx).WithValues("controller", "topology/machinedeployment")
+	clusterToMachineDeployments, err := util.ClusterToTypedObjectsMapper(mgr.GetClient(), &clusterv1.MachineDeploymentList{}, mgr.GetScheme())
+	if err != nil {
+		return err
+	}
+
+	err = ctrl.NewControllerManagedBy(mgr).
+		For(&clusterv1.MachineDeployment{},
+			builder.WithPredicates(
+				predicates.All(mgr.GetScheme(), predicateLog,
+					predicates.ResourceIsTopologyOwned(mgr.GetScheme(), predicateLog),
+					predicates.ResourceNotPaused(mgr.GetScheme(), predicateLog)),
+			),
+		).
 		Named("topology/machinedeployment").
 		WithOptions(options).
-		WithEventFilter(predicates.All(ctrl.LoggerFrom(ctx),
-			predicates.ResourceNotPausedAndHasFilterLabel(ctrl.LoggerFrom(ctx), r.WatchFilterValue),
-			predicates.ResourceIsTopologyOwned(ctrl.LoggerFrom(ctx)),
-		)).
+		WithEventFilter(predicates.ResourceHasFilterLabel(mgr.GetScheme(), predicateLog, r.WatchFilterValue)).
+		Watches(
+			&clusterv1.Cluster{},
+			handler.EnqueueRequestsFromMapFunc(clusterToMachineDeployments),
+			builder.WithPredicates(
+				predicates.All(mgr.GetScheme(), predicateLog,
+					predicates.ResourceIsChanged(mgr.GetScheme(), predicateLog),
+					predicates.ClusterUnpaused(mgr.GetScheme(), predicateLog),
+					predicates.ClusterHasTopology(mgr.GetScheme(), predicateLog),
+				),
+			),
+		).
 		Complete(r)
 	if err != nil {
 		return errors.Wrap(err, "failed setting up with a controller manager")
@@ -102,6 +130,17 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Re
 	log = log.WithValues("Cluster", klog.KRef(md.Namespace, md.Spec.ClusterName))
 	ctx = ctrl.LoggerInto(ctx, log)
 
+	// Return early if the MachineDeployment is not topology owned.
+	if !labels.IsTopologyOwned(md) {
+		log.Info(fmt.Sprintf("Reconciliation is skipped because the MachineDeployment does not have the %q label", clusterv1.ClusterTopologyOwnedLabel))
+		return ctrl.Result{}, nil
+	}
+
+	// Add finalizer first if not set to avoid the race condition between init and delete.
+	if finalizerAdded, err := finalizers.EnsureFinalizer(ctx, r.Client, md, clusterv1.MachineDeploymentTopologyFinalizer); err != nil || finalizerAdded {
+		return ctrl.Result{}, err
+	}
+
 	cluster, err := util.GetClusterByName(ctx, r.Client, md.Namespace, md.Spec.ClusterName)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -116,24 +155,17 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Re
 	// Create a patch helper to add or remove the finalizer from the MachineDeployment.
 	patchHelper, err := patch.NewHelper(md, r.Client)
 	if err != nil {
-		return ctrl.Result{}, errors.Wrapf(err, "failed to create patch helper for %s", tlog.KObj{Obj: md})
+		return ctrl.Result{}, err
 	}
 	defer func() {
 		if err := patchHelper.Patch(ctx, md); err != nil {
-			reterr = kerrors.NewAggregate([]error{reterr, errors.Wrapf(err, "failed to patch %s", tlog.KObj{Obj: md})})
+			reterr = kerrors.NewAggregate([]error{reterr, err})
 		}
 	}()
 
 	// Handle deletion reconciliation loop.
 	if !md.ObjectMeta.DeletionTimestamp.IsZero() {
 		return ctrl.Result{}, r.reconcileDelete(ctx, md)
-	}
-
-	// Add finalizer first if not set to avoid the race condition between init and delete.
-	// Note: Finalizers in general can only be added when the deletionTimestamp is not set.
-	if !controllerutil.ContainsFinalizer(md, clusterv1.MachineDeploymentTopologyFinalizer) {
-		controllerutil.AddFinalizer(md, clusterv1.MachineDeploymentTopologyFinalizer)
-		return ctrl.Result{}, nil
 	}
 
 	return ctrl.Result{}, nil
@@ -157,11 +189,11 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, md *clusterv1.MachineD
 	// Delete unused templates.
 	ref := md.Spec.Template.Spec.Bootstrap.ConfigRef
 	if err := machineset.DeleteTemplateIfUnused(ctx, r.Client, templatesInUse, ref); err != nil {
-		return errors.Wrapf(err, "failed to delete bootstrap template for %s", tlog.KObj{Obj: md})
+		return errors.Wrapf(err, "failed to delete %s %s for MachineDeployment %s", ref.Kind, klog.KRef(ref.Namespace, ref.Name), klog.KObj(md))
 	}
 	ref = &md.Spec.Template.Spec.InfrastructureRef
 	if err := machineset.DeleteTemplateIfUnused(ctx, r.Client, templatesInUse, ref); err != nil {
-		return errors.Wrapf(err, "failed to delete infrastructure template for %s", tlog.KObj{Obj: md})
+		return errors.Wrapf(err, "failed to delete %s %s for MachineDeployment %s", ref.Kind, klog.KRef(ref.Namespace, ref.Name), klog.KObj(md))
 	}
 
 	// If the MachineDeployment has a MachineHealthCheck delete it.
@@ -186,7 +218,7 @@ func (r *Reconciler) deleteMachineHealthCheckForMachineDeployment(ctx context.Co
 		if apierrors.IsNotFound(err) {
 			return nil
 		}
-		return errors.Wrapf(err, "failed to delete %s", tlog.KObj{Obj: mhc})
+		return errors.Wrapf(err, "failed to delete MachineHealthCheck %s", klog.KObj(mhc))
 	}
 	return nil
 }

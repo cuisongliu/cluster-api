@@ -26,9 +26,9 @@ A temporary cluster that is used to provision a Target Management cluster.
 ### Bootstrap provider
 
 Refers to a [provider](#provider) that implements a solution for the [bootstrap](#bootstrap) process.
-Bootstrap provider's interaction with Cluster API is based on what is defined in the [Cluster API contract](#contract). 
+Bootstrap provider's interaction with Cluster API is based on what is defined in the [Cluster API contract](#contract).
 
-See [CABPK](#cabpk). 
+See [CABPK](#cabpk).
 
 # C
 ---
@@ -37,13 +37,19 @@ See [CABPK](#cabpk).
 Cluster API Enhancement Proposal - patterned after [KEP](https://git.k8s.io/enhancements/keps/README.md). See [template](https://github.com/kubernetes-sigs/cluster-api/blob/main/docs/proposals/YYYYMMDD-template.md)
 
 ### CAPI
-Core Cluster API
+[Core Cluster API](#core-cluster-api)
 
 ### CAPA
 Cluster API Provider AWS
 
 ### CABPK
 Cluster API Bootstrap Provider Kubeadm
+
+### CABPOCNE
+Cluster API Bootstrap Provider Oracle Cloud Native Environment (OCNE)
+
+### CACPOCNE
+Cluster API Control Plane Provider Oracle Cloud Native Environment (OCNE)
 
 ### CAPC
 Cluster API Provider CloudStack
@@ -60,8 +66,20 @@ Cluster API Google Cloud Provider
 ### CAPH
 Cluster API Provider Hetzner
 
+### CAPHV
+Cluster API Provider Hivelocity
+
 ### CAPIBM
 Cluster API Provider IBM Cloud
+
+### CAPIM
+Cluster API Provider In Memory
+
+### CAPIO
+Cluster API Operator
+
+### CAPL
+Cluster API Provider Akamai (Linode)
 
 ### CAPM3
 Cluster API Provider Metal3
@@ -81,11 +99,14 @@ Cluster API Provider Kubevirt
 ### CAPO
 Cluster API Provider OpenStack
 
-## CAPOSC
+### CAPOSC
 Cluster API Provider Outscale
 
 ### CAPOCI
 Cluster API Provider Oracle Cloud Infrastructure (OCI)
+
+### CAPT
+Cluster API Provider Tinkerbell
 
 ### CAPV
 Cluster API Provider vSphere
@@ -98,6 +119,15 @@ Cluster API Provider VMware Cloud Director
 
 ### CAPZ
 Cluster API Provider Azure
+
+### CAIPAMIC
+Cluster API IPAM Provider In Cluster
+
+### CAIPAMX
+Cluster API IPAM Provider Nutanix
+
+### CAREX
+Cluster API Runtime Extensions Provider Nutanix
 
 ### Cloud provider
 
@@ -120,11 +150,17 @@ Or __Cluster API project__
 
 The Cluster API sub-project of the SIG-cluster-lifecycle. It is also used to refer to the software components, APIs, and community that produce them.
 
-See [core provider](#core-provider)
+See [Core Cluster API](#core-cluster-api), [CAPI](#capi)
 
 ### Cluster API Runtime
 
 The Cluster API execution model, a set of controllers cooperating in managing the Kubernetes cluster lifecycle.
+
+### Cluster Infrastructure
+
+or __Kubernetes Cluster Infrastructure__
+
+Defines the **infrastructure that supports a Kubernetes cluster**, like e.g. VPC, security groups, load balancers, etc. Please note that in the context of managed Kubernetes some of those components are going to be provided by the corresponding abstraction for a specific Cloud provider (EKS, OKE, AKS etc), and thus Cluster API should not take care of managing a subset or all those components.
 
 ### Contract
 
@@ -147,13 +183,27 @@ Control plane provider's interaction with Cluster API is based on what is define
 
 See [KCP](#kcp).
 
+### Core Cluster API
+
+With "core" Cluster API we refer to the common set of API and controllers that are required to run
+any Cluster API provider.
+
+Please note that in the Cluster API code base, side by side of "core" Cluster API components there
+is also a limited number of in-tree providers: [CABPK](#cabpk), [KCP](#kcp), [CAPD](#capd), [CAPIM](#capim)
+
+See [Cluster API](#cluster-api), [CAPI](#capi).
+
 ### Core provider
 
-Refers to a [provider](#provider) that implements Cluster API core controllers; if you 
-consider that the first project that must be deployed in a management Cluster is Cluster API itself, it should be clear why
-the Cluster API project is also referred to as the core provider.
+Refers to a [provider](#provider) that implements Cluster API [core controllers](#core-controllers)
 
-See [CAPI](#cluster-api).
+See [Cluster API](#cluster-api), [CAPI](#capi).
+
+### Core controllers
+
+The set of controllers in [Core Cluster API](#core-cluster-api).
+
+See [Cluster API](#cluster-api), [CAPI](#capi).
 
 # D
 ---
@@ -190,7 +240,7 @@ see [Server](#server)
 
 ### Infrastructure provider
 
-Refers to a [provider](#provider) that implements provisioning of infrastructure/computational resources required by 
+Refers to a [provider](#provider) that implements provisioning of infrastructure/computational resources required by
 the Cluster or by Machines (e.g. VMs, networking, etc.).
 Infrastructure provider's interaction with Cluster API is based on what is defined in the [Cluster API contract](#contract).
 
@@ -199,7 +249,7 @@ When there is more than one way to obtain resources from the same infrastructure
 
 For a complete list of providers see [Provider Implementations](providers.md).
 
-### Inline patch 
+### Inline patch
 
 A [patch](#patch) defined inline in a [ClusterClass](#clusterclass). An alternative to an [external patch](#external-patch).
 
@@ -263,6 +313,10 @@ See also: [Server](#server)
 
 Perform create, scale, upgrade, or destroy operations on the cluster.
 
+### Managed Kubernetes
+
+Managed Kubernetes refers to any Kubernetes cluster provisioning and maintenance abstraction, usually exposed as an API, that is natively available in a Cloud provider. For example: [EKS](https://aws.amazon.com/eks/), [OKE](https://www.oracle.com/cloud/cloud-native/container-engine-kubernetes/), [AKS](https://azure.microsoft.com/en-us/products/kubernetes-service), [GKE](https://cloud.google.com/kubernetes-engine), [IBM Cloud Kubernetes Service](https://www.ibm.com/cloud/kubernetes-service), [DOKS](https://www.digitalocean.com/products/kubernetes), and many more throughout the Kubernetes Cloud Native ecosystem.
+
 ### Managed Topology
 
 See [Topology](#topology)
@@ -279,7 +333,7 @@ one of them corresponding to an infrastructure tenant.
 Please note that up until v1alpha3 this concept had a different meaning, referring to the capability to run multiple
 instances of the same provider, each one with its own credentials; starting from v1alpha4 we are disambiguating the two concepts.
 
-See [Multi-tenancy](../developer/architecture/controllers/multi-tenancy.md) and [Support multiple instances](../developer/architecture/controllers/support-multiple-instances.md).
+See also [Support multiple instances](../developer/core/support-multiple-instances.md).
 
 # N
 ---
@@ -300,7 +354,7 @@ A generically understood combination of a kernel and system-level userspace inte
 # P
 ---
 
-### Patch 
+### Patch
 
 A set of instructions describing modifications to a Kubernetes object. Examples include JSON Patch and JSON Merge Patch.
 

@@ -13,6 +13,18 @@ rules:
   - list
   - watch
 - apiGroups:
+  - authentication.k8s.io
+  resources:
+  - tokenreviews
+  verbs:
+  - create
+- apiGroups:
+  - authorization.k8s.io
+  resources:
+  - subjectaccessreviews
+  verbs:
+  - create
+- apiGroups:
   - bootstrap.cluster.x-k8s.io
   - controlplane.cluster.x-k8s.io
   - infrastructure.cluster.x-k8s.io
@@ -31,6 +43,7 @@ rules:
   resources:
   - clusters
   - clusters/status
+  - machinepools
   verbs:
   - get
   - list
@@ -54,10 +67,7 @@ rules:
   - events
   verbs:
   - create
-  - get
-  - list
   - patch
-  - watch
 - apiGroups:
   - ""
   resources:

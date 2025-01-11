@@ -23,14 +23,17 @@ import (
 
 	"github.com/pkg/errors"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
 	"sigs.k8s.io/cluster-api/api/v1beta1/index"
+	"sigs.k8s.io/cluster-api/internal/controllers/machinedeployment/mdutil"
 	"sigs.k8s.io/cluster-api/internal/util/taints"
 	"sigs.k8s.io/cluster-api/util"
 	"sigs.k8s.io/cluster-api/util/annotations"
@@ -50,6 +53,7 @@ func (r *Reconciler) reconcileNode(ctx context.Context, s *scope) (ctrl.Result, 
 
 	// Create a watch on the nodes in the Cluster.
 	if err := r.watchClusterNodes(ctx, cluster); err != nil {
+		s.nodeGetError = err
 		return ctrl.Result{}, err
 	}
 
@@ -60,8 +64,9 @@ func (r *Reconciler) reconcileNode(ctx context.Context, s *scope) (ctrl.Result, 
 		return ctrl.Result{}, nil
 	}
 
-	remoteClient, err := r.Tracker.GetClient(ctx, util.ObjectKey(cluster))
+	remoteClient, err := r.ClusterCache.GetClient(ctx, util.ObjectKey(cluster))
 	if err != nil {
+		s.nodeGetError = err
 		return ctrl.Result{}, err
 	}
 
@@ -69,35 +74,43 @@ func (r *Reconciler) reconcileNode(ctx context.Context, s *scope) (ctrl.Result, 
 	node, err := r.getNode(ctx, remoteClient, *machine.Spec.ProviderID)
 	if err != nil {
 		if err == ErrNodeNotFound {
+			if !s.machine.DeletionTimestamp.IsZero() {
+				// Tolerate node not found when the machine is being deleted.
+				return ctrl.Result{}, nil
+			}
+
 			// While a NodeRef is set in the status, failing to get that node means the node is deleted.
 			// If Status.NodeRef is not set before, node still can be in the provisioning state.
 			if machine.Status.NodeRef != nil {
 				conditions.MarkFalse(machine, clusterv1.MachineNodeHealthyCondition, clusterv1.NodeNotFoundReason, clusterv1.ConditionSeverityError, "")
 				return ctrl.Result{}, errors.Wrapf(err, "no matching Node for Machine %q in namespace %q", machine.Name, machine.Namespace)
 			}
-			conditions.MarkFalse(machine, clusterv1.MachineNodeHealthyCondition, clusterv1.NodeProvisioningReason, clusterv1.ConditionSeverityWarning, "")
+			conditions.MarkFalse(machine, clusterv1.MachineNodeHealthyCondition, clusterv1.NodeProvisioningReason, clusterv1.ConditionSeverityWarning, "Waiting for a node with matching ProviderID to exist")
+			log.Info("Infrastructure provider reporting spec.providerID, matching Kubernetes node is not yet available", machine.Spec.InfrastructureRef.Kind, klog.KRef(machine.Spec.InfrastructureRef.Namespace, machine.Spec.InfrastructureRef.Name), "providerID", *machine.Spec.ProviderID)
 			// No need to requeue here. Nodes emit an event that triggers reconciliation.
 			return ctrl.Result{}, nil
 		}
-		log.Error(err, "Failed to retrieve Node by ProviderID")
+		s.nodeGetError = err
 		r.recorder.Event(machine, corev1.EventTypeWarning, "Failed to retrieve Node by ProviderID", err.Error())
+		conditions.MarkUnknown(machine, clusterv1.MachineNodeHealthyCondition, clusterv1.NodeInspectionFailedReason, "Failed to get the Node for this Machine by ProviderID")
 		return ctrl.Result{}, err
 	}
+	s.node = node
 
 	// Set the Machine NodeRef.
 	if machine.Status.NodeRef == nil {
 		machine.Status.NodeRef = &corev1.ObjectReference{
-			Kind:       node.Kind,
-			APIVersion: node.APIVersion,
-			Name:       node.Name,
-			UID:        node.UID,
+			APIVersion: corev1.SchemeGroupVersion.String(),
+			Kind:       "Node",
+			Name:       s.node.Name,
+			UID:        s.node.UID,
 		}
-		log.Info("Infrastructure provider reporting spec.providerID, Kubernetes node is now available", machine.Spec.InfrastructureRef.Kind, klog.KRef(machine.Spec.InfrastructureRef.Namespace, machine.Spec.InfrastructureRef.Name), "providerID", *machine.Spec.ProviderID, "node", klog.KRef("", machine.Status.NodeRef.Name))
+		log.Info("Infrastructure provider reporting spec.providerID, Kubernetes node is now available", machine.Spec.InfrastructureRef.Kind, klog.KRef(machine.Spec.InfrastructureRef.Namespace, machine.Spec.InfrastructureRef.Name), "providerID", *machine.Spec.ProviderID, "Node", klog.KRef("", machine.Status.NodeRef.Name))
 		r.recorder.Event(machine, corev1.EventTypeNormal, "SuccessfulSetNodeRef", machine.Status.NodeRef.Name)
 	}
 
 	// Set the NodeSystemInfo.
-	machine.Status.NodeInfo = &node.Status.NodeInfo
+	machine.Status.NodeInfo = &s.node.Status.NodeInfo
 
 	// Compute all the annotations that CAPI is setting on nodes;
 	// CAPI only enforces some annotations and never changes or removes them.
@@ -130,21 +143,26 @@ func (r *Reconciler) reconcileNode(ctx context.Context, s *scope) (ctrl.Result, 
 		}
 	}
 
-	_, nodeHadInterruptibleLabel := node.Labels[clusterv1.InterruptibleLabel]
+	_, nodeHadInterruptibleLabel := s.node.Labels[clusterv1.InterruptibleLabel]
 
 	// Reconcile node taints
-	if err := r.patchNode(ctx, remoteClient, node, nodeLabels, nodeAnnotations); err != nil {
-		return ctrl.Result{}, errors.Wrapf(err, "failed to reconcile Node %s", klog.KObj(node))
+	if err := r.patchNode(ctx, remoteClient, s.node, nodeLabels, nodeAnnotations, machine); err != nil {
+		return ctrl.Result{}, errors.Wrapf(err, "failed to reconcile Node %s", klog.KObj(s.node))
 	}
 	if !nodeHadInterruptibleLabel && interruptible {
 		// If the interruptible label is added to the node then record the event.
 		// Nb. Only record the event if the node previously did not have the label to avoid recording
 		// the event during every reconcile.
-		r.recorder.Event(machine, corev1.EventTypeNormal, "SuccessfulSetInterruptibleNodeLabel", node.Name)
+		r.recorder.Event(machine, corev1.EventTypeNormal, "SuccessfulSetInterruptibleNodeLabel", s.node.Name)
+	}
+
+	if s.infraMachine == nil || !s.infraMachine.GetDeletionTimestamp().IsZero() {
+		conditions.MarkFalse(s.machine, clusterv1.MachineNodeHealthyCondition, clusterv1.DeletingReason, clusterv1.ConditionSeverityInfo, "")
+		return ctrl.Result{}, nil
 	}
 
 	// Do the remaining node health checks, then set the node health to true if all checks pass.
-	status, message := summarizeNodeConditions(node)
+	status, message := summarizeNodeConditions(s.node)
 	if status == corev1.ConditionFalse {
 		conditions.MarkFalse(machine, clusterv1.MachineNodeHealthyCondition, clusterv1.NodeConditionsFailedReason, clusterv1.ConditionSeverityWarning, message)
 		return ctrl.Result{}, nil
@@ -210,6 +228,7 @@ func summarizeNodeConditions(node *corev1.Node) (corev1.ConditionStatus, string)
 			}
 		}
 	}
+	message = strings.TrimSuffix(message, ". ")
 	if semanticallyFalseStatus > 0 {
 		return corev1.ConditionFalse, message
 	}
@@ -255,7 +274,7 @@ func (r *Reconciler) getNode(ctx context.Context, c client.Reader, providerID st
 
 // PatchNode is required to workaround an issue on Node.Status.Address which is incorrectly annotated as patchStrategy=merge
 // and this causes SSA patch to fail in case there are two addresses with the same key https://github.com/kubernetes-sigs/cluster-api/issues/8417
-func (r *Reconciler) patchNode(ctx context.Context, remoteClient client.Client, node *corev1.Node, newLabels, newAnnotations map[string]string) error {
+func (r *Reconciler) patchNode(ctx context.Context, remoteClient client.Client, node *corev1.Node, newLabels, newAnnotations map[string]string, m *clusterv1.Machine) error {
 	newNode := node.DeepCopy()
 
 	// Adds the annotations CAPI sets on the node.
@@ -292,9 +311,85 @@ func (r *Reconciler) patchNode(ctx context.Context, remoteClient client.Client, 
 	// Drop the NodeUninitializedTaint taint on the node given that we are reconciling labels.
 	hasTaintChanges := taints.RemoveNodeTaint(newNode, clusterv1.NodeUninitializedTaint)
 
+	// Set Taint to a node in an old MachineSet and unset Taint from a node in a new MachineSet
+	isOutdated, notFound, err := shouldNodeHaveOutdatedTaint(ctx, r.Client, m)
+	if err != nil {
+		return errors.Wrapf(err, "failed to check if Node %s is outdated", klog.KRef("", node.Name))
+	}
+
+	// It is only possible to identify if we have to set or remove the NodeOutdatedRevisionTaint if shouldNodeHaveOutdatedTaint
+	// found all relevant objects.
+	// Example: when the MachineDeployment or Machineset can't be found due to a background deletion of objects.
+	if !notFound {
+		if isOutdated {
+			hasTaintChanges = taints.EnsureNodeTaint(newNode, clusterv1.NodeOutdatedRevisionTaint) || hasTaintChanges
+		} else {
+			hasTaintChanges = taints.RemoveNodeTaint(newNode, clusterv1.NodeOutdatedRevisionTaint) || hasTaintChanges
+		}
+	}
+
 	if !hasAnnotationChanges && !hasLabelChanges && !hasTaintChanges {
 		return nil
 	}
 
 	return remoteClient.Patch(ctx, newNode, client.StrategicMergeFrom(node))
+}
+
+// shouldNodeHaveOutdatedTaint tries to compare the revision of the owning MachineSet to the MachineDeployment.
+// It returns notFound = true if the OwnerReference is not set or the APIServer returns NotFound for the MachineSet or MachineDeployment.
+// Note: This three cases could happen during background deletion of objects.
+func shouldNodeHaveOutdatedTaint(ctx context.Context, c client.Client, m *clusterv1.Machine) (outdated bool, notFound bool, err error) {
+	if _, hasLabel := m.Labels[clusterv1.MachineDeploymentNameLabel]; !hasLabel {
+		return false, false, nil
+	}
+
+	// Resolve the MachineSet name via owner references because the label value
+	// could also be a hash.
+	objKey, notFound, err := getOwnerMachineSetObjectKey(m.ObjectMeta)
+	if err != nil || notFound {
+		return false, notFound, err
+	}
+	ms := &clusterv1.MachineSet{}
+	if err := c.Get(ctx, *objKey, ms); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, true, nil
+		}
+		return false, false, err
+	}
+	md := &clusterv1.MachineDeployment{}
+	objKey = &client.ObjectKey{
+		Namespace: m.ObjectMeta.Namespace,
+		Name:      m.Labels[clusterv1.MachineDeploymentNameLabel],
+	}
+	if err := c.Get(ctx, *objKey, md); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, true, nil
+		}
+		return false, false, err
+	}
+	msRev, err := mdutil.Revision(ms)
+	if err != nil {
+		return false, false, err
+	}
+	mdRev, err := mdutil.Revision(md)
+	if err != nil {
+		return false, false, err
+	}
+	if msRev < mdRev {
+		return true, false, nil
+	}
+	return false, false, nil
+}
+
+func getOwnerMachineSetObjectKey(obj metav1.ObjectMeta) (*client.ObjectKey, bool, error) {
+	for _, ref := range obj.GetOwnerReferences() {
+		gv, err := schema.ParseGroupVersion(ref.APIVersion)
+		if err != nil {
+			return nil, false, err
+		}
+		if ref.Kind == "MachineSet" && gv.Group == clusterv1.GroupVersion.Group {
+			return &client.ObjectKey{Namespace: obj.Namespace, Name: ref.Name}, false, nil
+		}
+	}
+	return nil, true, nil
 }

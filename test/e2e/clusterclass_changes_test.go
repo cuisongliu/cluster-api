@@ -21,7 +21,7 @@ package e2e
 
 import (
 	. "github.com/onsi/ginkgo/v2"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 )
 
 var _ = Describe("When testing ClusterClass changes [ClusterClass]", func() {
@@ -32,7 +32,7 @@ var _ = Describe("When testing ClusterClass changes [ClusterClass]", func() {
 			BootstrapClusterProxy:  bootstrapClusterProxy,
 			ArtifactFolder:         artifactFolder,
 			SkipCleanup:            skipCleanup,
-			InfrastructureProvider: pointer.String("docker"),
+			InfrastructureProvider: ptr.To("docker"),
 			Flavor:                 "topology",
 			// ModifyControlPlaneFields are the ControlPlane fields which will be set on the
 			// ControlPlaneTemplate of the ClusterClass after the initial Cluster creation.
@@ -51,6 +51,29 @@ var _ = Describe("When testing ClusterClass changes [ClusterClass]", func() {
 			// The test verifies that these fields are rolled out to the MachineDeployments.
 			ModifyMachineDeploymentInfrastructureMachineTemplateFields: map[string]interface{}{
 				"spec.template.spec.extraMounts": []interface{}{
+					map[string]interface{}{
+						"containerPath": "/var/run/docker.sock",
+						"hostPath":      "/var/run/docker.sock",
+					},
+					map[string]interface{}{
+						// /tmp cannot be used as containerPath as
+						// it already exists.
+						"containerPath": "/test",
+						"hostPath":      "/tmp",
+					},
+				},
+			},
+			// ModifyMachinePoolBootstrapConfigTemplateFields are the fields which will be set on the
+			// BootstrapConfigTemplate of all MachinePoolClasses of the ClusterClass after the initial Cluster creation.
+			// The test verifies that these fields are rolled out to the MachinePools.
+			ModifyMachinePoolBootstrapConfigTemplateFields: map[string]interface{}{
+				"spec.template.spec.verbosity": int64(4),
+			},
+			// ModifyMachinePoolInfrastructureMachineTemplateFields are the fields which will be set on the
+			// InfrastructureMachinePoolTemplate of all MachinePoolClasses of the ClusterClass after the initial Cluster creation.
+			// The test verifies that these fields are rolled out to the MachinePools.
+			ModifyMachinePoolInfrastructureMachinePoolTemplateFields: map[string]interface{}{
+				"spec.template.spec.template.extraMounts": []interface{}{
 					map[string]interface{}{
 						"containerPath": "/var/run/docker.sock",
 						"hostPath":      "/var/run/docker.sock",

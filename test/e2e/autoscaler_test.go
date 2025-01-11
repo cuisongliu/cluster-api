@@ -21,21 +21,23 @@ package e2e
 
 import (
 	. "github.com/onsi/ginkgo/v2"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 )
 
 var _ = Describe("When using the autoscaler with Cluster API using ClusterClass [ClusterClass]", func() {
 	AutoscalerSpec(ctx, func() AutoscalerSpecInput {
 		return AutoscalerSpecInput{
-			E2EConfig:                         e2eConfig,
-			ClusterctlConfigPath:              clusterctlConfigPath,
-			BootstrapClusterProxy:             bootstrapClusterProxy,
-			ArtifactFolder:                    artifactFolder,
-			SkipCleanup:                       skipCleanup,
-			InfrastructureProvider:            pointer.String("docker"),
-			InfrastructureMachineTemplateKind: "dockermachinetemplates",
-			Flavor:                            pointer.String("topology-autoscaler"),
-			AutoscalerVersion:                 "v1.26.2",
+			E2EConfig:                             e2eConfig,
+			ClusterctlConfigPath:                  clusterctlConfigPath,
+			BootstrapClusterProxy:                 bootstrapClusterProxy,
+			ArtifactFolder:                        artifactFolder,
+			SkipCleanup:                           skipCleanup,
+			InfrastructureProvider:                ptr.To("docker"),
+			InfrastructureMachineTemplateKind:     "dockermachinetemplates",
+			InfrastructureMachinePoolTemplateKind: "dockermachinepooltemplates",
+			InfrastructureMachinePoolKind:         "dockermachinepools",
+			Flavor:                                ptr.To("topology-autoscaler"),
+			AutoscalerVersion:                     "v1.31.1",
 		}
 	})
 })

@@ -3,7 +3,7 @@
 envsubst_cmd = "./hack/tools/bin/envsubst"
 clusterctl_cmd = "./bin/clusterctl"
 kubectl_cmd = "kubectl"
-kubernetes_version = "v1.27.3"
+kubernetes_version = "v1.31.2"
 
 load("ext://uibutton", "cmd_button", "location", "text_input")
 
@@ -184,9 +184,9 @@ def load_provider_tiltfiles():
 
 tilt_helper_dockerfile_header = """
 # Tilt image
-FROM golang:1.20.4 as tilt-helper
+FROM golang:1.22.10 as tilt-helper
 # Install delve. Note this should be kept in step with the Go release minor version.
-RUN go install github.com/go-delve/delve/cmd/dlv@v1.20
+RUN go install github.com/go-delve/delve/cmd/dlv@v1.22
 # Support live reloading with Tilt
 RUN wget --output-document /restart.sh --quiet https://raw.githubusercontent.com/tilt-dev/rerun-process-wrapper/master/restart.sh  && \
     wget --output-document /start.sh --quiet https://raw.githubusercontent.com/tilt-dev/rerun-process-wrapper/master/start.sh && \
@@ -195,7 +195,7 @@ RUN wget --output-document /restart.sh --quiet https://raw.githubusercontent.com
 """
 
 tilt_dockerfile_header = """
-FROM gcr.io/distroless/base:debug as tilt
+FROM golang:1.22.10 as tilt
 WORKDIR /
 COPY --from=tilt-helper /process.txt .
 COPY --from=tilt-helper /start.sh .
@@ -248,9 +248,15 @@ def build_go_binary(context, reload_deps, debug, go_main, binary_name, label):
     live_reload_deps = []
     for d in reload_deps:
         live_reload_deps.append(context + "/" + d)
+
+    # Ensure the {context}/.tiltbuild/bin directory before any other resources
+    # `local` is evaluated immediately, other resources are executed later in the startup/when triggered
+    local("mkdir -p {context}/.tiltbuild/bin".format(context = shlex.quote(context)), quiet = True)
+
+    # Build the go binary
     local_resource(
         label.lower() + "_binary",
-        cmd = "cd {context};mkdir -p .tiltbuild/bin;{build_cmd}".format(
+        cmd = "cd {context};{build_cmd}".format(
             context = context,
             build_cmd = build_cmd,
         ),
@@ -336,23 +342,24 @@ def enable_provider(name, debug):
 
     port_forwards, links = get_port_forwards(debug)
 
-    build_go_binary(
-        context = p.get("context"),
-        reload_deps = p.get("live_reload_deps"),
-        debug = debug,
-        go_main = p.get("go_main", "main.go"),
-        binary_name = "manager",
-        label = label,
-    )
+    if p.get("image"):
+        build_go_binary(
+            context = p.get("context"),
+            reload_deps = p.get("live_reload_deps"),
+            debug = debug,
+            go_main = p.get("go_main", "main.go"),
+            binary_name = "manager",
+            label = label,
+        )
 
-    build_docker_image(
-        image = p.get("image"),
-        context = p.get("context"),
-        binary_name = "manager",
-        additional_docker_helper_commands = p.get("additional_docker_helper_commands", ""),
-        additional_docker_build_commands = p.get("additional_docker_build_commands", ""),
-        port_forwards = port_forwards,
-    )
+        build_docker_image(
+            image = p.get("image"),
+            context = p.get("context"),
+            binary_name = "manager",
+            additional_docker_helper_commands = p.get("additional_docker_helper_commands", ""),
+            additional_docker_build_commands = p.get("additional_docker_build_commands", ""),
+            port_forwards = port_forwards,
+        )
 
     additional_objs = []
     p_resources = p.get("additional_resources", [])
@@ -360,9 +367,9 @@ def enable_provider(name, debug):
         k8s_yaml(p.get("context") + "/" + resource)
         additional_objs = additional_objs + decode_yaml_stream(read_file(p.get("context") + "/" + resource))
 
-    if p.get("kustomize_config", True):
+    if p.get("apply_provider_yaml", True):
         yaml = read_file("./.tiltbuild/yaml/{}.provider.yaml".format(name))
-        k8s_yaml(yaml)
+        k8s_yaml(yaml, allow_duplicates = True)
         objs = decode_yaml_stream(yaml)
         k8s_resource(
             workload = find_object_name(objs, "Deployment"),
@@ -376,7 +383,8 @@ def enable_provider(name, debug):
 
 def find_object_name(objs, kind):
     for o in objs:
-        if o["kind"] == kind:
+        # Ignore objects that are not part of the provider, e.g. the ASO Deployment in CAPZ.
+        if o["kind"] == kind and "cluster.x-k8s.io/provider" in o["metadata"]["labels"]:
             return o["metadata"]["name"]
     return ""
 
@@ -431,7 +439,7 @@ def deploy_observability():
 
         cmd_button(
             "loki:import logs",
-            argv = ["sh", "-c", "cd ./hack/tools/log-push && go run ./main.go --log-path=$LOG_PATH"],
+            argv = ["sh", "-c", "cd ./hack/tools/internal/log-push && go run ./main.go --log-path=$LOG_PATH"],
             resource = "loki",
             icon_name = "import_export",
             text = "Import logs",
@@ -474,6 +482,19 @@ def deploy_observability():
             port_forwards = [port_forward(local_port = 8000, container_port = 8081, name = "View visualization")],
             labels = ["observability"],
             objects = ["capi-visualizer:serviceaccount"],
+        )
+
+def deploy_additional_kustomizations():
+    for name in settings.get("additional_kustomizations", []):
+        yaml = read_file("./.tiltbuild/yaml/{}.kustomization.yaml".format(name))
+        k8s_yaml(yaml)
+        objs = decode_yaml_stream(yaml)
+        print("objects")
+        print(find_all_objects_names(objs))
+        k8s_resource(
+            new_name = name,
+            objects = find_all_objects_names(objs),
+            labels = ["kustomization"],
         )
 
 def prepare_all():
@@ -521,11 +542,14 @@ def deploy_templates(filename, label, substitutions):
     basename = os.path.basename(filename)
     if basename.endswith(".yaml"):
         if basename.startswith("clusterclass-"):
-            template_name = basename.replace("clusterclass-", "").replace(".yaml", "")
-            deploy_clusterclass(template_name, label, filename, substitutions)
+            clusterclass_name = basename.replace("clusterclass-", "").replace(".yaml", "")
+            deploy_clusterclass(clusterclass_name, label, filename, substitutions)
         elif basename.startswith("cluster-template-"):
-            clusterclass_name = basename.replace("cluster-template-", "").replace(".yaml", "")
-            deploy_cluster_template(clusterclass_name, label, filename, substitutions)
+            template_name = basename.replace("cluster-template-", "").replace(".yaml", "")
+            deploy_cluster_template(template_name, label, filename, substitutions)
+        elif basename == "cluster-template.yaml":
+            template_name = "default"
+            deploy_cluster_template(template_name, label, filename, substitutions)
 
 def deploy_clusterclass(clusterclass_name, label, filename, substitutions):
     apply_clusterclass_cmd = "cat " + filename + " | " + envsubst_cmd + " | " + kubectl_cmd + " apply --namespace=$NAMESPACE -f - && echo \"ClusterClass created from\'" + filename + "\', don't forget to delete\n\""
@@ -633,6 +657,8 @@ prepare_all()
 deploy_provider_crds()
 
 deploy_observability()
+
+deploy_additional_kustomizations()
 
 enable_providers()
 

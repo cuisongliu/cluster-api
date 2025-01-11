@@ -30,8 +30,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
-	"sigs.k8s.io/cluster-api/internal/test/builder"
 	"sigs.k8s.io/cluster-api/util"
+	"sigs.k8s.io/cluster-api/util/test/builder"
 )
 
 func TestMachineDeploymentTopologyFinalizer(t *testing.T) {
@@ -41,9 +41,14 @@ func TestMachineDeploymentTopologyFinalizer(t *testing.T) {
 	mdBuilder := builder.MachineDeployment(metav1.NamespaceDefault, "md").
 		WithClusterName("fake-cluster").
 		WithBootstrapTemplate(mdBT).
-		WithInfrastructureTemplate(mdIMT)
-
+		WithInfrastructureTemplate(mdIMT).
+		WithLabels(map[string]string{
+			clusterv1.ClusterTopologyOwnedLabel: "",
+		})
 	md := mdBuilder.Build()
+
+	mdWithoutTopologyOwnedLabel := md.DeepCopy()
+	delete(mdWithoutTopologyOwnedLabel.Labels, clusterv1.ClusterTopologyOwnedLabel)
 	mdWithFinalizer := mdBuilder.Build()
 	mdWithFinalizer.Finalizers = []string{clusterv1.MachineDeploymentTopologyFinalizer}
 
@@ -63,6 +68,11 @@ func TestMachineDeploymentTopologyFinalizer(t *testing.T) {
 			name:            "should retain ClusterTopology finalizer on MachineDeployment with finalizer",
 			md:              mdWithFinalizer,
 			expectFinalizer: true,
+		},
+		{
+			name:            "should not add ClusterTopology finalizer on MachineDeployment without topology owned label",
+			md:              mdWithoutTopologyOwnedLabel,
+			expectFinalizer: false,
 		},
 	}
 

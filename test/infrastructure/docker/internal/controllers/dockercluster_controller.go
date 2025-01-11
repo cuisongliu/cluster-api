@@ -36,7 +36,9 @@ import (
 	"sigs.k8s.io/cluster-api/test/infrastructure/docker/internal/docker"
 	"sigs.k8s.io/cluster-api/util"
 	"sigs.k8s.io/cluster-api/util/conditions"
+	"sigs.k8s.io/cluster-api/util/finalizers"
 	"sigs.k8s.io/cluster-api/util/patch"
+	"sigs.k8s.io/cluster-api/util/paused"
 	"sigs.k8s.io/cluster-api/util/predicates"
 )
 
@@ -67,6 +69,11 @@ func (r *DockerClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 
+	// Add finalizer first if not set to avoid the race condition between init and delete.
+	if finalizerAdded, err := finalizers.EnsureFinalizer(ctx, r.Client, dockerCluster, infrav1.ClusterFinalizer); err != nil || finalizerAdded {
+		return ctrl.Result{}, err
+	}
+
 	// Fetch the Cluster.
 	cluster, err := util.GetOwnerCluster(ctx, r.Client, dockerCluster.ObjectMeta)
 	if err != nil {
@@ -77,14 +84,12 @@ func (r *DockerClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, nil
 	}
 
+	if isPaused, conditionChanged, err := paused.EnsurePausedCondition(ctx, r.Client, cluster, dockerCluster); err != nil || isPaused || conditionChanged {
+		return ctrl.Result{}, err
+	}
+
 	log = log.WithValues("Cluster", klog.KObj(cluster))
 	ctx = ctrl.LoggerInto(ctx, log)
-
-	// Create a helper for managing a docker container hosting the loadbalancer.
-	externalLoadBalancer, err := docker.NewLoadBalancer(ctx, cluster, dockerCluster)
-	if err != nil {
-		return ctrl.Result{}, errors.Wrapf(err, "failed to create helper for managing the externalLoadBalancer")
-	}
 
 	// Initialize the patch helper
 	patchHelper, err := patch.NewHelper(dockerCluster, r.Client)
@@ -94,12 +99,19 @@ func (r *DockerClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// Always attempt to Patch the DockerCluster object and status after each reconciliation.
 	defer func() {
 		if err := patchDockerCluster(ctx, patchHelper, dockerCluster); err != nil {
-			log.Error(err, "failed to patch DockerCluster")
+			log.Error(err, "Failed to patch DockerCluster")
 			if rerr == nil {
 				rerr = err
 			}
 		}
 	}()
+
+	// Create a helper for managing a docker container hosting the loadbalancer.
+	externalLoadBalancer, err := docker.NewLoadBalancer(ctx, cluster, dockerCluster)
+	if err != nil {
+		conditions.MarkFalse(dockerCluster, infrav1.LoadBalancerAvailableCondition, infrav1.LoadBalancerProvisioningFailedReason, clusterv1.ConditionSeverityWarning, err.Error())
+		return ctrl.Result{}, errors.Wrapf(err, "failed to create helper for managing the externalLoadBalancer")
+	}
 
 	// Support FailureDomains
 	// In cloud providers this would likely look up which failure domains are supported and set the status appropriately.
@@ -109,13 +121,6 @@ func (r *DockerClusterReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// Handle deleted clusters
 	if !dockerCluster.DeletionTimestamp.IsZero() {
 		return ctrl.Result{}, r.reconcileDelete(ctx, dockerCluster, externalLoadBalancer)
-	}
-
-	// Add finalizer first if not set to avoid the race condition between init and delete.
-	// Note: Finalizers in general can only be added when the deletionTimestamp is not set.
-	if !controllerutil.ContainsFinalizer(dockerCluster, infrav1.ClusterFinalizer) {
-		controllerutil.AddFinalizer(dockerCluster, infrav1.ClusterFinalizer)
-		return ctrl.Result{}, nil
 	}
 
 	// Handle non-deleted clusters
@@ -197,16 +202,21 @@ func (r *DockerClusterReconciler) reconcileDelete(ctx context.Context, dockerClu
 
 // SetupWithManager will add watches for this controller.
 func (r *DockerClusterReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manager, options controller.Options) error {
+	if r.Client == nil || r.ContainerRuntime == nil {
+		return errors.New("Client and ContainerRuntime must not be nil")
+	}
+	predicateLog := ctrl.LoggerFrom(ctx).WithValues("controller", "dockercluster")
 	err := ctrl.NewControllerManagedBy(mgr).
 		For(&infrav1.DockerCluster{}).
 		WithOptions(options).
-		WithEventFilter(predicates.ResourceNotPausedAndHasFilterLabel(ctrl.LoggerFrom(ctx), r.WatchFilterValue)).
+		WithEventFilter(predicates.ResourceHasFilterLabel(mgr.GetScheme(), predicateLog, r.WatchFilterValue)).
 		Watches(
 			&clusterv1.Cluster{},
 			handler.EnqueueRequestsFromMapFunc(util.ClusterToInfrastructureMapFunc(ctx, infrav1.GroupVersion.WithKind("DockerCluster"), mgr.GetClient(), &infrav1.DockerCluster{})),
-			builder.WithPredicates(
-				predicates.ClusterUnpaused(ctrl.LoggerFrom(ctx)),
-			),
+			builder.WithPredicates(predicates.All(mgr.GetScheme(), predicateLog,
+				predicates.ResourceIsChanged(mgr.GetScheme(), predicateLog),
+				predicates.ClusterPausedTransitions(mgr.GetScheme(), predicateLog),
+			)),
 		).Complete(r)
 	if err != nil {
 		return errors.Wrap(err, "failed setting up with a controller manager")
