@@ -26,7 +26,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/blang/semver"
+	"github.com/blang/semver/v4"
 	"github.com/go-logr/logr"
 	"github.com/pkg/errors"
 	corev1 "k8s.io/api/core/v1"
@@ -82,7 +82,7 @@ func NewMachine(ctx context.Context, cluster *clusterv1.Cluster, machine string,
 
 	filters := container.FilterBuilder{}
 	filters.AddKeyNameValue(filterLabel, clusterLabelKey, cluster.Name)
-	filters.AddKeyValue(filterName, fmt.Sprintf("^%s$", machineContainerName(cluster.Name, machine)))
+	filters.AddKeyValue(filterName, fmt.Sprintf("^%s$", MachineContainerName(cluster.Name, machine)))
 	for key, val := range filterLabels {
 		filters.AddKeyNameValue(filterLabel, key, val)
 	}
@@ -92,6 +92,9 @@ func NewMachine(ctx context.Context, cluster *clusterv1.Cluster, machine string,
 		return nil, err
 	}
 
+	// We tolerate this until removal;
+	// after removal IPFamily will become an internal CAPD concept.
+	// See https://github.com/kubernetes-sigs/cluster-api/issues/7521.
 	ipFamily, err := cluster.GetIPFamily()
 	if err != nil {
 		return nil, fmt.Errorf("create docker machine: %s", err)
@@ -126,6 +129,9 @@ func ListMachinesByCluster(ctx context.Context, cluster *clusterv1.Cluster, labe
 		return nil, err
 	}
 
+	// We tolerate this until removal;
+	// after removal IPFamily will become an internal CAPD concept.
+	// See https://github.com/kubernetes-sigs/cluster-api/issues/7521 .
 	ipFamily, err := cluster.GetIPFamily()
 	if err != nil {
 		return nil, fmt.Errorf("list docker machines by cluster: %s", err)
@@ -165,7 +171,7 @@ func (m *Machine) Name() string {
 
 // ContainerName return the name of the container for this machine.
 func (m *Machine) ContainerName() string {
-	return machineContainerName(m.cluster, m.machine)
+	return MachineContainerName(m.cluster, m.machine)
 }
 
 // ProviderID return the provider identifier for this machine.
@@ -441,7 +447,7 @@ func (m *Machine) SetNodeProviderID(ctx context.Context, c client.Client) error 
 	node.Spec.ProviderID = m.ProviderID()
 
 	if err = patchHelper.Patch(ctx, node); err != nil {
-		return errors.Wrap(err, "failed update providerID")
+		return errors.Wrap(err, "failed to set providerID")
 	}
 
 	return nil
@@ -451,7 +457,7 @@ func (m *Machine) SetNodeProviderID(ctx context.Context, c client.Client) error 
 // 1) For all CAPD Nodes it sets the ProviderID on the Kubernetes Node.
 // 2) If the cloudProviderTaint is set it updates the addresses in the Kubernetes Node `.status.addresses`.
 // 3) If the cloudProviderTaint is set it removes it to inform Kubernetes that this Node is now initialized.
-func (m *Machine) CloudProviderNodePatch(ctx context.Context, c client.Client, dockerMachine *infrav1.DockerMachine) error {
+func (m *Machine) CloudProviderNodePatch(ctx context.Context, c client.Client, addresses []clusterv1.MachineAddress) error {
 	log := ctrl.LoggerFrom(ctx)
 
 	dockerNode, err := m.getDockerNode(ctx)
@@ -486,7 +492,7 @@ func (m *Machine) CloudProviderNodePatch(ctx context.Context, c client.Client, d
 			nodeAddressMap[addr] = true
 		}
 		log.Info("Setting Kubernetes node IP Addresses")
-		for _, addr := range dockerMachine.Status.Addresses {
+		for _, addr := range addresses {
 			if _, ok := nodeAddressMap[corev1.NodeAddress{Address: addr.Address, Type: corev1.NodeAddressType(addr.Type)}]; ok {
 				continue
 			}
@@ -508,10 +514,7 @@ func (m *Machine) CloudProviderNodePatch(ctx context.Context, c client.Client, d
 		}
 	}
 
-	if err = patchHelper.Patch(ctx, node); err != nil {
-		return errors.Wrap(err, "failed to patch node")
-	}
-	return nil
+	return patchHelper.Patch(ctx, node)
 }
 
 func (m *Machine) getDockerNode(ctx context.Context) (*types.Node, error) {
@@ -550,7 +553,7 @@ func (m *Machine) Delete(ctx context.Context) error {
 func logContainerDebugInfo(ctx context.Context, log logr.Logger, name string) {
 	containerRuntime, err := container.RuntimeFrom(ctx)
 	if err != nil {
-		log.Error(err, "failed to connect to container runtime")
+		log.Error(err, "Failed to connect to container runtime")
 		return
 	}
 
@@ -564,7 +567,7 @@ func logContainerDebugInfo(ctx context.Context, log logr.Logger, name string) {
 	var buffer bytes.Buffer
 	err = containerRuntime.ContainerDebugInfo(debugCtx, name, &buffer)
 	if err != nil {
-		log.Error(err, "failed to get logs from the machine container")
+		log.Error(err, "Failed to get logs from the machine container")
 		return
 	}
 	log.Info("Got logs from the machine container", "output", strings.ReplaceAll(buffer.String(), "\\n", "\n"))

@@ -17,6 +17,7 @@ limitations under the License.
 package machinedeployment
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -25,7 +26,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/tools/record"
-	"k8s.io/utils/pointer"
+	"k8s.io/client-go/util/retry"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -35,6 +37,8 @@ import (
 	"sigs.k8s.io/cluster-api/internal/util/ssa"
 	"sigs.k8s.io/cluster-api/util"
 	"sigs.k8s.io/cluster-api/util/conditions"
+	"sigs.k8s.io/cluster-api/util/patch"
+	"sigs.k8s.io/cluster-api/util/test/builder"
 )
 
 const (
@@ -57,6 +61,11 @@ func TestMachineDeploymentReconciler(t *testing.T) {
 
 		t.Log("Creating the Cluster Kubeconfig Secret")
 		g.Expect(env.CreateKubeconfigSecret(ctx, cluster)).To(Succeed())
+
+		// Set InfrastructureReady to true so ClusterCache creates the clusterAccessor.
+		patch := client.MergeFrom(cluster.DeepCopy())
+		cluster.Status.InfrastructureReady = true
+		g.Expect(env.Status().Patch(ctx, cluster, patch)).To(Succeed())
 
 		return ns, cluster
 	}
@@ -90,9 +99,9 @@ func TestMachineDeploymentReconciler(t *testing.T) {
 			},
 			Spec: clusterv1.MachineDeploymentSpec{
 				ClusterName:          testCluster.Name,
-				MinReadySeconds:      pointer.Int32(0),
-				Replicas:             pointer.Int32(2),
-				RevisionHistoryLimit: pointer.Int32(0),
+				MinReadySeconds:      ptr.To[int32](0),
+				Replicas:             ptr.To[int32](2),
+				RevisionHistoryLimit: ptr.To[int32](0),
 				Selector: metav1.LabelSelector{
 					// We're using the same labels for spec.selector and spec.template.labels.
 					// The labels are later changed and we will use the initial labels later to
@@ -104,7 +113,7 @@ func TestMachineDeploymentReconciler(t *testing.T) {
 					RollingUpdate: &clusterv1.MachineRollingUpdateDeployment{
 						MaxUnavailable: intOrStrPtr(0),
 						MaxSurge:       intOrStrPtr(1),
-						DeletePolicy:   pointer.String("Oldest"),
+						DeletePolicy:   ptr.To("Oldest"),
 					},
 				},
 				Template: clusterv1.MachineTemplateSpec{
@@ -118,9 +127,10 @@ func TestMachineDeploymentReconciler(t *testing.T) {
 							APIVersion: "infrastructure.cluster.x-k8s.io/v1beta1",
 							Kind:       "GenericInfrastructureMachineTemplate",
 							Name:       "md-template",
+							Namespace:  namespace.Name,
 						},
 						Bootstrap: clusterv1.Bootstrap{
-							DataSecretName: pointer.String("data-secret-name"),
+							DataSecretName: ptr.To("data-secret-name"),
 						},
 					},
 				},
@@ -194,7 +204,7 @@ func TestMachineDeploymentReconciler(t *testing.T) {
 
 		t.Log("Verifying the linked infrastructure template has a cluster owner reference")
 		g.Eventually(func() bool {
-			obj, err := external.Get(ctx, env, &deployment.Spec.Template.Spec.InfrastructureRef, deployment.Namespace)
+			obj, err := external.Get(ctx, env, &deployment.Spec.Template.Spec.InfrastructureRef)
 			if err != nil {
 				return false
 			}
@@ -256,7 +266,7 @@ func TestMachineDeploymentReconciler(t *testing.T) {
 		t.Log("Scaling the MachineDeployment to 3 replicas")
 		desiredMachineDeploymentReplicas := int32(3)
 		modifyFunc := func(d *clusterv1.MachineDeployment) {
-			d.Spec.Replicas = pointer.Int32(desiredMachineDeploymentReplicas)
+			d.Spec.Replicas = ptr.To[int32](desiredMachineDeploymentReplicas)
 		}
 		g.Expect(updateMachineDeployment(ctx, env, deployment, modifyFunc)).To(Succeed())
 		g.Eventually(func() int {
@@ -301,6 +311,7 @@ func TestMachineDeploymentReconciler(t *testing.T) {
 			APIVersion: "infrastructure.cluster.x-k8s.io/v1beta1",
 			Kind:       "GenericInfrastructureMachineTemplate",
 			Name:       "md-template-2",
+			Namespace:  namespace.Name,
 		}
 		modifyFunc = func(d *clusterv1.MachineDeployment) { d.Spec.Template.Spec.InfrastructureRef = infraTmpl2Ref }
 		g.Expect(updateMachineDeployment(ctx, env, deployment, modifyFunc)).To(Succeed())
@@ -365,7 +376,7 @@ func TestMachineDeploymentReconciler(t *testing.T) {
 		// expect the Reconcile to be called and the MachineSet to be updated in-place.
 		t.Log("Updating deletePolicy on the MachineDeployment")
 		modifyFunc = func(d *clusterv1.MachineDeployment) {
-			d.Spec.Strategy.RollingUpdate.DeletePolicy = pointer.String("Newest")
+			d.Spec.Strategy.RollingUpdate.DeletePolicy = ptr.To("Newest")
 		}
 		g.Expect(updateMachineDeployment(ctx, env, deployment, modifyFunc)).To(Succeed())
 		g.Eventually(func(g Gomega) {
@@ -385,7 +396,7 @@ func TestMachineDeploymentReconciler(t *testing.T) {
 			if err := env.List(ctx, machineSets, msListOpts...); err != nil {
 				return false
 			}
-			for i := 0; i < len(machineSets.Items); i++ {
+			for range len(machineSets.Items) {
 				ms := machineSets.Items[0]
 				if !metav1.IsControlledBy(&ms, deployment) || metav1.GetControllerOf(&ms).Kind != "MachineDeployment" {
 					return false
@@ -411,7 +422,7 @@ func TestMachineDeploymentReconciler(t *testing.T) {
 			// to properly set AvailableReplicas.
 			foundMachines := &clusterv1.MachineList{}
 			g.Expect(env.List(ctx, foundMachines, client.InNamespace(namespace.Name))).To(Succeed())
-			for i := 0; i < len(foundMachines.Items); i++ {
+			for i := range len(foundMachines.Items) {
 				m := foundMachines.Items[i]
 				// Skip over deleted Machines
 				if !m.DeletionTimestamp.IsZero() {
@@ -439,7 +450,7 @@ func TestMachineDeploymentReconciler(t *testing.T) {
 			// to properly set AvailableReplicas.
 			foundMachines := &clusterv1.MachineList{}
 			g.Expect(env.List(ctx, foundMachines, client.InNamespace(namespace.Name))).To(Succeed())
-			for i := 0; i < len(foundMachines.Items); i++ {
+			for i := range len(foundMachines.Items) {
 				m := foundMachines.Items[i]
 				if !m.DeletionTimestamp.IsZero() {
 					continue
@@ -514,9 +525,9 @@ func TestMachineDeploymentReconciler_CleanUpManagedFieldsForSSAAdoption(t *testi
 		Spec: clusterv1.MachineDeploymentSpec{
 			Paused:               true, // Set this to true as we do not want to test the other parts of the reconciler in this test.
 			ClusterName:          testCluster.Name,
-			MinReadySeconds:      pointer.Int32(0),
-			Replicas:             pointer.Int32(2),
-			RevisionHistoryLimit: pointer.Int32(0),
+			MinReadySeconds:      ptr.To[int32](0),
+			Replicas:             ptr.To[int32](2),
+			RevisionHistoryLimit: ptr.To[int32](0),
 			Selector: metav1.LabelSelector{
 				// We're using the same labels for spec.selector and spec.template.labels.
 				MatchLabels: labels,
@@ -526,7 +537,7 @@ func TestMachineDeploymentReconciler_CleanUpManagedFieldsForSSAAdoption(t *testi
 				RollingUpdate: &clusterv1.MachineRollingUpdateDeployment{
 					MaxUnavailable: intOrStrPtr(0),
 					MaxSurge:       intOrStrPtr(1),
-					DeletePolicy:   pointer.String("Oldest"),
+					DeletePolicy:   ptr.To("Oldest"),
 				},
 			},
 			Template: clusterv1.MachineTemplateSpec{
@@ -540,9 +551,10 @@ func TestMachineDeploymentReconciler_CleanUpManagedFieldsForSSAAdoption(t *testi
 						APIVersion: "infrastructure.cluster.x-k8s.io/v1beta1",
 						Kind:       "GenericInfrastructureMachineTemplate",
 						Name:       "md-template",
+						Namespace:  namespace.Name,
 					},
 					Bootstrap: clusterv1.Bootstrap{
-						DataSecretName: pointer.String("data-secret-name"),
+						DataSecretName: ptr.To("data-secret-name"),
 					},
 				},
 			},
@@ -595,7 +607,7 @@ func TestMachineDeploymentReconciler_CleanUpManagedFieldsForSSAAdoption(t *testi
 		},
 		Spec: clusterv1.MachineSetSpec{
 			ClusterName:     testCluster.Name,
-			Replicas:        pointer.Int32(0),
+			Replicas:        ptr.To[int32](0),
 			MinReadySeconds: 0,
 			Selector: metav1.LabelSelector{
 				MatchLabels: labels,
@@ -610,9 +622,10 @@ func TestMachineDeploymentReconciler_CleanUpManagedFieldsForSSAAdoption(t *testi
 						APIVersion: "infrastructure.cluster.x-k8s.io/v1beta1",
 						Kind:       "GenericInfrastructureMachineTemplate",
 						Name:       "md-template",
+						Namespace:  testCluster.Namespace,
 					},
 					Bootstrap: clusterv1.Bootstrap{
-						DataSecretName: pointer.String("data-secret-name"),
+						DataSecretName: ptr.To("data-secret-name"),
 					},
 					Version: &version,
 				},
@@ -736,7 +749,7 @@ func TestMachineSetToDeployments(t *testing.T) {
 
 	for _, tc := range testsCases {
 		got := r.MachineSetToDeployments(ctx, tc.mapObject)
-		g.Expect(got).To(Equal(tc.expected))
+		g.Expect(got).To(BeComparableTo(tc.expected))
 	}
 }
 
@@ -799,12 +812,13 @@ func TestGetMachineDeploymentsForMachineSet(t *testing.T) {
 		recorder: record.NewFakeRecorder(32),
 	}
 
-	for _, tc := range testCases {
+	for i := range testCases {
+		tc := testCases[i]
 		var got []client.Object
 		for _, x := range r.getMachineDeploymentsForMachineSet(ctx, &tc.machineSet) {
 			got = append(got, x)
 		}
-		g.Expect(got).To(Equal(tc.expected))
+		g.Expect(got).To(BeComparableTo(tc.expected))
 	}
 }
 
@@ -948,7 +962,8 @@ func TestGetMachineSetsForDeployment(t *testing.T) {
 		},
 	}
 
-	for _, tc := range testCases {
+	for i := range testCases {
+		tc := testCases[i]
 		t.Run(tc.name, func(t *testing.T) {
 			g := NewWithT(t)
 
@@ -957,14 +972,127 @@ func TestGetMachineSetsForDeployment(t *testing.T) {
 				recorder: record.NewFakeRecorder(32),
 			}
 
-			got, err := r.getMachineSetsForDeployment(ctx, &tc.machineDeployment)
+			s := &scope{
+				machineDeployment: &tc.machineDeployment,
+			}
+			err := r.getAndAdoptMachineSetsForDeployment(ctx, s)
 			g.Expect(err).ToNot(HaveOccurred())
-			g.Expect(got).To(HaveLen(len(tc.expected)))
 
-			for idx, res := range got {
+			g.Expect(s.machineSets).To(HaveLen(len(tc.expected)))
+			for idx, res := range s.machineSets {
 				g.Expect(res.Name).To(Equal(tc.expected[idx].Name))
 				g.Expect(res.Namespace).To(Equal(tc.expected[idx].Namespace))
 			}
+		})
+	}
+}
+
+// We have this as standalone variant to be able to use it from the tests.
+func updateMachineDeployment(ctx context.Context, c client.Client, md *clusterv1.MachineDeployment, modify func(*clusterv1.MachineDeployment)) error {
+	mdObjectKey := util.ObjectKey(md)
+	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		// Note: We intentionally don't re-use the passed in MachineDeployment md here as that would
+		// overwrite any local changes we might have previously made to the MachineDeployment with the version
+		// we get here from the apiserver.
+		md := &clusterv1.MachineDeployment{}
+		if err := c.Get(ctx, mdObjectKey, md); err != nil {
+			return err
+		}
+		patchHelper, err := patch.NewHelper(md, c)
+		if err != nil {
+			return err
+		}
+		modify(md)
+		return patchHelper.Patch(ctx, md)
+	})
+}
+
+func TestReconciler_reconcileDelete(t *testing.T) {
+	labels := map[string]string{
+		"some": "labelselector",
+	}
+	md := builder.MachineDeployment("default", "md0").WithClusterName("test").Build()
+	md.Finalizers = []string{
+		clusterv1.MachineDeploymentFinalizer,
+	}
+	md.DeletionTimestamp = ptr.To(metav1.Now())
+	md.Spec.Selector = metav1.LabelSelector{
+		MatchLabels: labels,
+	}
+	mdWithoutFinalizer := md.DeepCopy()
+	mdWithoutFinalizer.Finalizers = []string{}
+	tests := []struct {
+		name              string
+		machineDeployment *clusterv1.MachineDeployment
+		want              *clusterv1.MachineDeployment
+		objs              []client.Object
+		wantMachineSets   []clusterv1.MachineSet
+		expectError       bool
+	}{
+		{
+			name:              "Should do nothing when no descendant MachineSets exist and finalizer is already gone",
+			machineDeployment: mdWithoutFinalizer.DeepCopy(),
+			want:              mdWithoutFinalizer.DeepCopy(),
+			objs:              nil,
+			wantMachineSets:   nil,
+			expectError:       false,
+		},
+		{
+			name:              "Should remove finalizer when no descendant MachineSets exist",
+			machineDeployment: md.DeepCopy(),
+			want:              mdWithoutFinalizer.DeepCopy(),
+			objs:              nil,
+			wantMachineSets:   nil,
+			expectError:       false,
+		},
+		{
+			name:              "Should keep finalizer when descendant MachineSets exist and trigger deletion only for descendant MachineSets",
+			machineDeployment: md.DeepCopy(),
+			want:              md.DeepCopy(),
+			objs: []client.Object{
+				builder.MachineSet("default", "ms0").WithClusterName("test").WithLabels(labels).Build(),
+				builder.MachineSet("default", "ms1").WithClusterName("test").WithLabels(labels).Build(),
+				builder.MachineSet("default", "ms2-not-part-of-md").WithClusterName("test").Build(),
+				builder.MachineSet("default", "ms3-not-part-of-md").WithClusterName("test").Build(),
+			},
+			wantMachineSets: []clusterv1.MachineSet{
+				*builder.MachineSet("default", "ms2-not-part-of-md").WithClusterName("test").Build(),
+				*builder.MachineSet("default", "ms3-not-part-of-md").WithClusterName("test").Build(),
+			},
+			expectError: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := NewWithT(t)
+
+			c := fake.NewClientBuilder().WithObjects(tt.objs...).Build()
+			r := &Reconciler{
+				Client:   c,
+				recorder: record.NewFakeRecorder(32),
+			}
+
+			s := &scope{
+				machineDeployment: tt.machineDeployment,
+			}
+			err := r.reconcileDelete(ctx, s)
+			if tt.expectError {
+				g.Expect(err).To(HaveOccurred())
+			} else {
+				g.Expect(err).ToNot(HaveOccurred())
+			}
+
+			g.Expect(tt.machineDeployment).To(BeComparableTo(tt.want))
+
+			machineSetList := &clusterv1.MachineSetList{}
+			g.Expect(c.List(ctx, machineSetList, client.InNamespace("default"))).ToNot(HaveOccurred())
+
+			// Remove ResourceVersion so we can actually compare.
+			for i := range machineSetList.Items {
+				machineSetList.Items[i].ResourceVersion = ""
+			}
+
+			g.Expect(machineSetList.Items).To(ConsistOf(tt.wantMachineSets))
 		})
 	}
 }

@@ -28,7 +28,6 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	kerrors "k8s.io/apimachinery/pkg/util/errors"
-	"k8s.io/apiserver/pkg/storage/names"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -37,6 +36,7 @@ import (
 	"sigs.k8s.io/cluster-api/controllers/external"
 	controlplanev1 "sigs.k8s.io/cluster-api/controlplane/kubeadm/api/v1beta1"
 	"sigs.k8s.io/cluster-api/controlplane/kubeadm/internal"
+	topologynames "sigs.k8s.io/cluster-api/internal/topology/names"
 	"sigs.k8s.io/cluster-api/internal/util/ssa"
 	"sigs.k8s.io/cluster-api/util"
 	"sigs.k8s.io/cluster-api/util/certs"
@@ -46,6 +46,15 @@ import (
 	"sigs.k8s.io/cluster-api/util/patch"
 	"sigs.k8s.io/cluster-api/util/secret"
 )
+
+// mandatoryMachineReadinessGates are readinessGates KCP enforces to be set on machine it owns.
+var mandatoryMachineReadinessGates = []clusterv1.MachineReadinessGate{
+	{ConditionType: string(controlplanev1.KubeadmControlPlaneMachineAPIServerPodHealthyV1Beta2Condition)},
+	{ConditionType: string(controlplanev1.KubeadmControlPlaneMachineControllerManagerPodHealthyV1Beta2Condition)},
+	{ConditionType: string(controlplanev1.KubeadmControlPlaneMachineSchedulerPodHealthyV1Beta2Condition)},
+	{ConditionType: string(controlplanev1.KubeadmControlPlaneMachineEtcdPodHealthyV1Beta2Condition)},
+	{ConditionType: string(controlplanev1.KubeadmControlPlaneMachineEtcdMemberHealthyV1Beta2Condition)},
+}
 
 func (r *KubeadmControlPlaneReconciler) reconcileKubeconfig(ctx context.Context, controlPlane *internal.ControlPlane) (ctrl.Result, error) {
 	log := ctrl.LoggerFrom(ctx)
@@ -91,7 +100,7 @@ func (r *KubeadmControlPlaneReconciler) reconcileKubeconfig(ctx context.Context,
 	}
 
 	if needsRotation {
-		log.Info("rotating kubeconfig secret")
+		log.Info("Rotating kubeconfig secret")
 		if err := kubeconfig.RegenerateSecret(ctx, r.Client, configSecret); err != nil {
 			return ctrl.Result{}, errors.Wrap(err, "failed to regenerate kubeconfig")
 		}
@@ -104,11 +113,11 @@ func (r *KubeadmControlPlaneReconciler) reconcileKubeconfig(ctx context.Context,
 func (r *KubeadmControlPlaneReconciler) adoptKubeconfigSecret(ctx context.Context, configSecret *corev1.Secret, kcp *controlplanev1.KubeadmControlPlane) (reterr error) {
 	patchHelper, err := patch.NewHelper(configSecret, r.Client)
 	if err != nil {
-		return errors.Wrap(err, "failed to create patch helper for the kubeconfig secret")
+		return err
 	}
 	defer func() {
 		if err := patchHelper.Patch(ctx, configSecret); err != nil {
-			reterr = errors.Wrap(err, "failed to patch the kubeconfig secret")
+			reterr = kerrors.NewAggregate([]error{reterr, err})
 		}
 	}()
 	controller := metav1.GetControllerOf(configSecret)
@@ -131,7 +140,8 @@ func (r *KubeadmControlPlaneReconciler) adoptKubeconfigSecret(ctx context.Contex
 	return nil
 }
 
-func (r *KubeadmControlPlaneReconciler) reconcileExternalReference(ctx context.Context, cluster *clusterv1.Cluster, ref *corev1.ObjectReference) error {
+func (r *KubeadmControlPlaneReconciler) reconcileExternalReference(ctx context.Context, controlPlane *internal.ControlPlane) error {
+	ref := &controlPlane.KCP.Spec.MachineTemplate.InfrastructureRef
 	if !strings.HasSuffix(ref.Kind, clusterv1.TemplateSuffix) {
 		return nil
 	}
@@ -140,30 +150,45 @@ func (r *KubeadmControlPlaneReconciler) reconcileExternalReference(ctx context.C
 		return err
 	}
 
-	obj, err := external.Get(ctx, r.Client, ref, cluster.Namespace)
+	obj, err := external.Get(ctx, r.Client, ref)
 	if err != nil {
+		if apierrors.IsNotFound(err) {
+			controlPlane.InfraMachineTemplateIsNotFound = true
+		}
 		return err
 	}
 
 	// Note: We intentionally do not handle checking for the paused label on an external template reference
+
+	desiredOwnerRef := metav1.OwnerReference{
+		APIVersion: clusterv1.GroupVersion.String(),
+		Kind:       "Cluster",
+		Name:       controlPlane.Cluster.Name,
+		UID:        controlPlane.Cluster.UID,
+	}
+
+	if util.HasExactOwnerRef(obj.GetOwnerReferences(), desiredOwnerRef) {
+		return nil
+	}
 
 	patchHelper, err := patch.NewHelper(obj, r.Client)
 	if err != nil {
 		return err
 	}
 
-	obj.SetOwnerReferences(util.EnsureOwnerRef(obj.GetOwnerReferences(), metav1.OwnerReference{
-		APIVersion: clusterv1.GroupVersion.String(),
-		Kind:       "Cluster",
-		Name:       cluster.Name,
-		UID:        cluster.UID,
-	}))
+	obj.SetOwnerReferences(util.EnsureOwnerRef(obj.GetOwnerReferences(), desiredOwnerRef))
 
 	return patchHelper.Patch(ctx, obj)
 }
 
-func (r *KubeadmControlPlaneReconciler) cloneConfigsAndGenerateMachine(ctx context.Context, cluster *clusterv1.Cluster, kcp *controlplanev1.KubeadmControlPlane, bootstrapSpec *bootstrapv1.KubeadmConfigSpec, failureDomain *string) error {
+func (r *KubeadmControlPlaneReconciler) cloneConfigsAndGenerateMachine(ctx context.Context, cluster *clusterv1.Cluster, kcp *controlplanev1.KubeadmControlPlane, bootstrapSpec *bootstrapv1.KubeadmConfigSpec, failureDomain *string) (*clusterv1.Machine, error) {
 	var errs []error
+
+	// Compute desired Machine
+	machine, err := r.computeDesiredMachine(kcp, cluster, failureDomain, nil)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to create Machine: failed to compute desired Machine")
+	}
 
 	// Since the cloned resource should eventually have a controller ref for the Machine, we create an
 	// OwnerReference here without the Controller field set
@@ -179,6 +204,7 @@ func (r *KubeadmControlPlaneReconciler) cloneConfigsAndGenerateMachine(ctx conte
 		Client:      r.Client,
 		TemplateRef: &kcp.Spec.MachineTemplate.InfrastructureRef,
 		Namespace:   kcp.Namespace,
+		Name:        machine.Name,
 		OwnerRef:    infraCloneOwner,
 		ClusterName: cluster.Name,
 		Labels:      internal.ControlPlaneMachineLabelsForCluster(kcp, cluster.Name),
@@ -188,11 +214,12 @@ func (r *KubeadmControlPlaneReconciler) cloneConfigsAndGenerateMachine(ctx conte
 		// Safe to return early here since no resources have been created yet.
 		conditions.MarkFalse(kcp, controlplanev1.MachinesCreatedCondition, controlplanev1.InfrastructureTemplateCloningFailedReason,
 			clusterv1.ConditionSeverityError, err.Error())
-		return errors.Wrap(err, "failed to clone infrastructure template")
+		return nil, errors.Wrap(err, "failed to clone infrastructure template")
 	}
+	machine.Spec.InfrastructureRef = *infraRef
 
 	// Clone the bootstrap configuration
-	bootstrapRef, err := r.generateKubeadmConfig(ctx, kcp, cluster, bootstrapSpec)
+	bootstrapRef, err := r.generateKubeadmConfig(ctx, kcp, cluster, bootstrapSpec, machine.Name)
 	if err != nil {
 		conditions.MarkFalse(kcp, controlplanev1.MachinesCreatedCondition, controlplanev1.BootstrapTemplateCloningFailedReason,
 			clusterv1.ConditionSeverityError, err.Error())
@@ -201,7 +228,9 @@ func (r *KubeadmControlPlaneReconciler) cloneConfigsAndGenerateMachine(ctx conte
 
 	// Only proceed to generating the Machine if we haven't encountered an error
 	if len(errs) == 0 {
-		if err := r.createMachine(ctx, kcp, cluster, infraRef, bootstrapRef, failureDomain); err != nil {
+		machine.Spec.Bootstrap.ConfigRef = bootstrapRef
+
+		if err := r.createMachine(ctx, kcp, machine); err != nil {
 			conditions.MarkFalse(kcp, controlplanev1.MachinesCreatedCondition, controlplanev1.MachineGenerationFailedReason,
 				clusterv1.ConditionSeverityError, err.Error())
 			errs = append(errs, errors.Wrap(err, "failed to create Machine"))
@@ -213,11 +242,10 @@ func (r *KubeadmControlPlaneReconciler) cloneConfigsAndGenerateMachine(ctx conte
 		if err := r.cleanupFromGeneration(ctx, infraRef, bootstrapRef); err != nil {
 			errs = append(errs, errors.Wrap(err, "failed to cleanup generated resources"))
 		}
-
-		return kerrors.NewAggregate(errs)
+		return nil, kerrors.NewAggregate(errs)
 	}
 
-	return nil
+	return machine, nil
 }
 
 func (r *KubeadmControlPlaneReconciler) cleanupFromGeneration(ctx context.Context, remoteRefs ...*corev1.ObjectReference) error {
@@ -241,7 +269,7 @@ func (r *KubeadmControlPlaneReconciler) cleanupFromGeneration(ctx context.Contex
 	return kerrors.NewAggregate(errs)
 }
 
-func (r *KubeadmControlPlaneReconciler) generateKubeadmConfig(ctx context.Context, kcp *controlplanev1.KubeadmControlPlane, cluster *clusterv1.Cluster, spec *bootstrapv1.KubeadmConfigSpec) (*corev1.ObjectReference, error) {
+func (r *KubeadmControlPlaneReconciler) generateKubeadmConfig(ctx context.Context, kcp *controlplanev1.KubeadmControlPlane, cluster *clusterv1.Cluster, spec *bootstrapv1.KubeadmConfigSpec, name string) (*corev1.ObjectReference, error) {
 	// Create an owner reference without a controller reference because the owning controller is the machine controller
 	owner := metav1.OwnerReference{
 		APIVersion: controlplanev1.GroupVersion.String(),
@@ -252,7 +280,7 @@ func (r *KubeadmControlPlaneReconciler) generateKubeadmConfig(ctx context.Contex
 
 	bootstrapConfig := &bootstrapv1.KubeadmConfig{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:            names.SimpleNameGenerator.GenerateName(kcp.Name + "-"),
+			Name:            name,
 			Namespace:       kcp.Namespace,
 			Labels:          internal.ControlPlaneMachineLabelsForCluster(kcp, cluster.Name),
 			Annotations:     kcp.Spec.MachineTemplate.ObjectMeta.Annotations,
@@ -297,11 +325,7 @@ func (r *KubeadmControlPlaneReconciler) updateExternalObject(ctx context.Context
 	return nil
 }
 
-func (r *KubeadmControlPlaneReconciler) createMachine(ctx context.Context, kcp *controlplanev1.KubeadmControlPlane, cluster *clusterv1.Cluster, infraRef, bootstrapRef *corev1.ObjectReference, failureDomain *string) error {
-	machine, err := r.computeDesiredMachine(kcp, cluster, infraRef, bootstrapRef, failureDomain, nil)
-	if err != nil {
-		return errors.Wrap(err, "failed to create Machine: failed to compute desired Machine")
-	}
+func (r *KubeadmControlPlaneReconciler) createMachine(ctx context.Context, kcp *controlplanev1.KubeadmControlPlane, machine *clusterv1.Machine) error {
 	if err := ssa.Patch(ctx, r.Client, kcpManagerName, machine); err != nil {
 		return errors.Wrap(err, "failed to create Machine")
 	}
@@ -312,11 +336,7 @@ func (r *KubeadmControlPlaneReconciler) createMachine(ctx context.Context, kcp *
 }
 
 func (r *KubeadmControlPlaneReconciler) updateMachine(ctx context.Context, machine *clusterv1.Machine, kcp *controlplanev1.KubeadmControlPlane, cluster *clusterv1.Cluster) (*clusterv1.Machine, error) {
-	updatedMachine, err := r.computeDesiredMachine(
-		kcp, cluster,
-		&machine.Spec.InfrastructureRef, machine.Spec.Bootstrap.ConfigRef,
-		machine.Spec.FailureDomain, machine,
-	)
+	updatedMachine, err := r.computeDesiredMachine(kcp, cluster, machine.Spec.FailureDomain, machine)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to update Machine: failed to compute desired Machine")
 	}
@@ -336,14 +356,25 @@ func (r *KubeadmControlPlaneReconciler) updateMachine(ctx context.Context, machi
 // There are small differences in how we calculate the Machine depending on if it
 // is a create or update. Example: for a new Machine we have to calculate a new name,
 // while for an existing Machine we have to use the name of the existing Machine.
-func (r *KubeadmControlPlaneReconciler) computeDesiredMachine(kcp *controlplanev1.KubeadmControlPlane, cluster *clusterv1.Cluster, infraRef, bootstrapRef *corev1.ObjectReference, failureDomain *string, existingMachine *clusterv1.Machine) (*clusterv1.Machine, error) {
+func (r *KubeadmControlPlaneReconciler) computeDesiredMachine(kcp *controlplanev1.KubeadmControlPlane, cluster *clusterv1.Cluster, failureDomain *string, existingMachine *clusterv1.Machine) (*clusterv1.Machine, error) {
 	var machineName string
 	var machineUID types.UID
 	var version *string
 	annotations := map[string]string{}
 	if existingMachine == nil {
 		// Creating a new machine
-		machineName = names.SimpleNameGenerator.GenerateName(kcp.Name + "-")
+		nameTemplate := "{{ .kubeadmControlPlane.name }}-{{ .random }}"
+		if kcp.Spec.MachineNamingStrategy != nil && kcp.Spec.MachineNamingStrategy.Template != "" {
+			nameTemplate = kcp.Spec.MachineNamingStrategy.Template
+			if !strings.Contains(nameTemplate, "{{ .random }}") {
+				return nil, errors.New("cannot generate Machine name: {{ .random }} is missing in machineNamingStrategy.template")
+			}
+		}
+		generatedMachineName, err := topologynames.KCPMachineNameGenerator(nameTemplate, cluster.Name, kcp.Name).GenerateName()
+		if err != nil {
+			return nil, errors.Wrap(err, "failed to generate Machine name")
+		}
+		machineName = generatedMachineName
 		version = &kcp.Spec.Version
 
 		// Machine's bootstrap config may be missing ClusterConfiguration if it is not the first machine in the control plane.
@@ -380,6 +411,9 @@ func (r *KubeadmControlPlaneReconciler) computeDesiredMachine(kcp *controlplanev
 			annotations[controlplanev1.RemediationForAnnotation] = remediationData
 		}
 	}
+	// Setting pre-terminate hook so we can later remove the etcd member right before Machine termination
+	// (i.e. before InfraMachine deletion).
+	annotations[controlplanev1.PreTerminateHookCleanupAnnotation] = ""
 
 	// Construct the basic Machine.
 	desiredMachine := &clusterv1.Machine{
@@ -399,13 +433,9 @@ func (r *KubeadmControlPlaneReconciler) computeDesiredMachine(kcp *controlplanev
 			Annotations: map[string]string{},
 		},
 		Spec: clusterv1.MachineSpec{
-			ClusterName:       cluster.Name,
-			Version:           version,
-			FailureDomain:     failureDomain,
-			InfrastructureRef: *infraRef,
-			Bootstrap: clusterv1.Bootstrap{
-				ConfigRef: bootstrapRef,
-			},
+			ClusterName:   cluster.Name,
+			Version:       version,
+			FailureDomain: failureDomain,
 		},
 	}
 
@@ -431,5 +461,32 @@ func (r *KubeadmControlPlaneReconciler) computeDesiredMachine(kcp *controlplanev
 	desiredMachine.Spec.NodeDeletionTimeout = kcp.Spec.MachineTemplate.NodeDeletionTimeout
 	desiredMachine.Spec.NodeVolumeDetachTimeout = kcp.Spec.MachineTemplate.NodeVolumeDetachTimeout
 
+	if existingMachine != nil {
+		desiredMachine.Spec.InfrastructureRef = existingMachine.Spec.InfrastructureRef
+		desiredMachine.Spec.Bootstrap.ConfigRef = existingMachine.Spec.Bootstrap.ConfigRef
+		desiredMachine.Spec.ReadinessGates = existingMachine.Spec.ReadinessGates
+	}
+	ensureMandatoryReadinessGates(desiredMachine)
+
 	return desiredMachine, nil
+}
+
+func ensureMandatoryReadinessGates(m *clusterv1.Machine) {
+	if m.Spec.ReadinessGates == nil {
+		m.Spec.ReadinessGates = mandatoryMachineReadinessGates
+		return
+	}
+
+	for _, want := range mandatoryMachineReadinessGates {
+		found := false
+		for _, got := range m.Spec.ReadinessGates {
+			if got.ConditionType == want.ConditionType {
+				found = true
+				break
+			}
+		}
+		if !found {
+			m.Spec.ReadinessGates = append(m.Spec.ReadinessGates, want)
+		}
+	}
 }

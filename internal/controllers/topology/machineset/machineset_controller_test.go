@@ -30,8 +30,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
-	"sigs.k8s.io/cluster-api/internal/test/builder"
 	"sigs.k8s.io/cluster-api/util"
+	"sigs.k8s.io/cluster-api/util/test/builder"
 )
 
 func TestMachineSetTopologyFinalizer(t *testing.T) {
@@ -58,6 +58,8 @@ func TestMachineSetTopologyFinalizer(t *testing.T) {
 		})
 
 	ms := msBuilder.Build()
+	msWithoutTopologyOwnedLabel := ms.DeepCopy()
+	delete(msWithoutTopologyOwnedLabel.Labels, clusterv1.ClusterTopologyOwnedLabel)
 	msWithFinalizer := msBuilder.Build()
 	msWithFinalizer.Finalizers = []string{clusterv1.MachineSetTopologyFinalizer}
 
@@ -77,6 +79,11 @@ func TestMachineSetTopologyFinalizer(t *testing.T) {
 			name:            "should retain ClusterTopology finalizer on MachineSet with finalizer",
 			ms:              msWithFinalizer,
 			expectFinalizer: true,
+		},
+		{
+			name:            "should not add ClusterTopology finalizer on MachineSet without topology owned label",
+			ms:              msWithoutTopologyOwnedLabel,
+			expectFinalizer: false,
 		},
 	}
 

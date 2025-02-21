@@ -22,12 +22,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
@@ -51,7 +52,7 @@ type SelfHostedSpecInput struct {
 	// InfrastructureProviders specifies the infrastructure to use for clusterctl
 	// operations (Example: get cluster templates).
 	// Note: In most cases this need not be specified. It only needs to be specified when
-	// multiple infrastructure providers (ex: CAPD + in-memory) are installed on the cluster as clusterctl will not be
+	// multiple infrastructure providers are installed on the cluster as clusterctl will not be
 	// able to identify the default.
 	InfrastructureProvider *string
 
@@ -59,6 +60,10 @@ type SelfHostedSpecInput struct {
 	// If true, the variable KUBERNETES_VERSION is expected to be set.
 	// If false, the variables KUBERNETES_VERSION_UPGRADE_FROM, KUBERNETES_VERSION_UPGRADE_TO,
 	// ETCD_VERSION_UPGRADE_TO and COREDNS_VERSION_UPGRADE_TO are expected to be set.
+	// There are also (optional) variables CONTROL_PLANE_MACHINE_TEMPLATE_UPGRADE_TO and
+	// WORKERS_MACHINE_TEMPLATE_UPGRADE_TO to change the infrastructure machine template
+	// during the upgrade. Note that these templates need to have the clusterctl.cluster.x-k8s.io/move
+	// label in order to be moved to the self hosted cluster (since they are not part of the owner chain).
 	SkipUpgrade bool
 
 	// ControlPlaneMachineCount is used in `config cluster` to configure the count of the control plane machines used in the test.
@@ -70,6 +75,10 @@ type SelfHostedSpecInput struct {
 	// worker machines is a multiple of WorkerMachineCount.
 	// Default is 1.
 	WorkerMachineCount *int64
+
+	// Allows to inject a function to be run after test namespace is created.
+	// If not specified, this is a no-op.
+	PostNamespaceCreated func(managementClusterProxy framework.ClusterProxy, workloadClusterNamespace string)
 }
 
 // SelfHostedSpec implements a test that verifies Cluster API creating a cluster, pivoting to a self-hosted cluster.
@@ -90,6 +99,9 @@ func SelfHostedSpec(ctx context.Context, inputGetter func() SelfHostedSpecInput)
 		controlPlaneMachineCount int64
 		workerMachineCount       int64
 
+		etcdVersionUpgradeTo    string
+		coreDNSVersionUpgradeTo string
+
 		kubernetesVersion string
 	)
 
@@ -105,18 +117,19 @@ func SelfHostedSpec(ctx context.Context, inputGetter func() SelfHostedSpecInput)
 			// Use KubernetesVersion if no upgrade step is defined by test input.
 			Expect(input.E2EConfig.Variables).To(HaveKey(KubernetesVersion))
 
-			kubernetesVersion = input.E2EConfig.GetVariable(KubernetesVersion)
+			kubernetesVersion = input.E2EConfig.MustGetVariable(KubernetesVersion)
 		} else {
 			Expect(input.E2EConfig.Variables).To(HaveKey(KubernetesVersionUpgradeFrom))
 			Expect(input.E2EConfig.Variables).To(HaveKey(KubernetesVersionUpgradeTo))
-			Expect(input.E2EConfig.Variables).To(HaveKey(EtcdVersionUpgradeTo))
-			Expect(input.E2EConfig.Variables).To(HaveKey(CoreDNSVersionUpgradeTo))
 
-			kubernetesVersion = input.E2EConfig.GetVariable(KubernetesVersionUpgradeFrom)
+			kubernetesVersion = input.E2EConfig.MustGetVariable(KubernetesVersionUpgradeFrom)
+
+			etcdVersionUpgradeTo = input.E2EConfig.GetVariableOrEmpty(EtcdVersionUpgradeTo)
+			coreDNSVersionUpgradeTo = input.E2EConfig.GetVariableOrEmpty(CoreDNSVersionUpgradeTo)
 		}
 
 		// Setup a Namespace where to host objects for this spec and create a watcher for the namespace events.
-		namespace, cancelWatches = setupSpecNamespace(ctx, specName, input.BootstrapClusterProxy, input.ArtifactFolder)
+		namespace, cancelWatches = framework.SetupSpecNamespace(ctx, specName, input.BootstrapClusterProxy, input.ArtifactFolder, input.PostNamespaceCreated)
 		clusterResources = new(clusterctl.ApplyClusterTemplateAndWaitResult)
 
 		if input.ControlPlaneMachineCount == nil {
@@ -183,7 +196,7 @@ func SelfHostedSpec(ctx context.Context, inputGetter func() SelfHostedSpecInput)
 
 		cluster := clusterResources.Cluster
 		// Get a ClusterBroker so we can interact with the workload cluster
-		selfHostedClusterProxy = input.BootstrapClusterProxy.GetWorkloadCluster(ctx, cluster.Namespace, cluster.Name)
+		selfHostedClusterProxy = input.BootstrapClusterProxy.GetWorkloadCluster(ctx, cluster.Namespace, cluster.Name, framework.WithMachineLogCollector(input.BootstrapClusterProxy.GetLogCollector()))
 
 		Byf("Creating a namespace for hosting the %s test spec", specName)
 		selfHostedNamespace, selfHostedCancelWatches = framework.CreateNamespaceAndWatchEvents(ctx, framework.CreateNamespaceAndWatchEventsInput{
@@ -192,6 +205,11 @@ func SelfHostedSpec(ctx context.Context, inputGetter func() SelfHostedSpecInput)
 			Name:      namespace.Name,
 			LogFolder: filepath.Join(input.ArtifactFolder, "clusters", "bootstrap"),
 		})
+
+		if input.PostNamespaceCreated != nil {
+			log.Logf("Calling postNamespaceCreated for namespace %s", selfHostedNamespace.Name)
+			input.PostNamespaceCreated(selfHostedClusterProxy, selfHostedNamespace.Name)
+		}
 
 		By("Initializing the workload cluster")
 		// watchesCtx is used in log streaming to be able to get canceld via cancelWatches after ending the test suite.
@@ -214,11 +232,11 @@ func SelfHostedSpec(ctx context.Context, inputGetter func() SelfHostedSpecInput)
 		Consistently(func() error {
 			kubeSystem := &corev1.Namespace{}
 			return input.BootstrapClusterProxy.GetClient().Get(ctx, client.ObjectKey{Name: "kube-system"}, kubeSystem)
-		}, "5s", "100ms").Should(BeNil(), "Failed to assert bootstrap API server stability")
+		}, "5s", "100ms").Should(Succeed(), "Failed to assert bootstrap API server stability")
 		Consistently(func() error {
 			kubeSystem := &corev1.Namespace{}
 			return selfHostedClusterProxy.GetClient().Get(ctx, client.ObjectKey{Name: "kube-system"}, kubeSystem)
-		}, "5s", "100ms").Should(BeNil(), "Failed to assert self-hosted API server stability")
+		}, "5s", "100ms").Should(Succeed(), "Failed to assert self-hosted API server stability")
 
 		// Get the machines of the workloadCluster before it is moved to become self-hosted to make sure that the move did not trigger
 		// any unexpected rollouts.
@@ -275,20 +293,35 @@ func SelfHostedSpec(ctx context.Context, inputGetter func() SelfHostedSpecInput)
 		})
 		Expect(controlPlane).ToNot(BeNil())
 
-		// After the move check that there were no unexpected rollouts.
+		// After the move: wait for MachineList to be available after the upgrade.
 		log.Logf("Verify there are no unexpected rollouts")
-		Consistently(func() bool {
+		Eventually(func() error {
 			postMoveMachineList := &unstructured.UnstructuredList{}
 			postMoveMachineList.SetGroupVersionKind(clusterv1.GroupVersion.WithKind("MachineList"))
-			err = selfHostedClusterProxy.GetClient().List(
+			return selfHostedClusterProxy.GetClient().List(
 				ctx,
 				postMoveMachineList,
 				client.InNamespace(namespace.Name),
 				client.MatchingLabels{clusterv1.ClusterNameLabel: workloadClusterName},
 			)
-			Expect(err).NotTo(HaveOccurred(), "Failed to list machines after move")
-			return validateMachineRollout(preMoveMachineList, postMoveMachineList)
-		}, "3m", "30s").Should(BeTrue(), "Machines should not roll out after move to self-hosted cluster")
+		}, "3m", "30s").ShouldNot(HaveOccurred(), "MachineList should be available after move to self-hosted cluster")
+
+		log.Logf("Waiting for three minutes before checking if an unexpected rollout happened")
+		time.Sleep(time.Minute * 3)
+
+		// After the move: check that there were no unexpected rollouts.
+		postMoveMachineList := &unstructured.UnstructuredList{}
+		log.Logf("Verify there are no unexpected rollouts")
+		Eventually(func() error {
+			postMoveMachineList.SetGroupVersionKind(clusterv1.GroupVersion.WithKind("MachineList"))
+			return selfHostedClusterProxy.GetClient().List(
+				ctx,
+				postMoveMachineList,
+				client.InNamespace(namespace.Name),
+				client.MatchingLabels{clusterv1.ClusterNameLabel: workloadClusterName},
+			)
+		}, "3m", "30s").ShouldNot(HaveOccurred(), "MachineList should be available after move to self-hosted cluster")
+		Expect(validateMachineRollout(preMoveMachineList, postMoveMachineList)).To(BeTrue(), "Machines should not roll out after move to self-hosted cluster")
 
 		if input.SkipUpgrade {
 			// Only do upgrade step if defined by test input.
@@ -307,17 +340,19 @@ func SelfHostedSpec(ctx context.Context, inputGetter func() SelfHostedSpecInput)
 			// Cluster is using ClusterClass, upgrade via topology.
 			By("Upgrading the Cluster topology")
 			framework.UpgradeClusterTopologyAndWaitForUpgrade(ctx, framework.UpgradeClusterTopologyAndWaitForUpgradeInput{
-				ClusterProxy:                selfHostedClusterProxy,
-				Cluster:                     clusterResources.Cluster,
-				ControlPlane:                clusterResources.ControlPlane,
-				EtcdImageTag:                input.E2EConfig.GetVariable(EtcdVersionUpgradeTo),
-				DNSImageTag:                 input.E2EConfig.GetVariable(CoreDNSVersionUpgradeTo),
-				MachineDeployments:          clusterResources.MachineDeployments,
-				KubernetesUpgradeVersion:    input.E2EConfig.GetVariable(KubernetesVersionUpgradeTo),
-				WaitForMachinesToBeUpgraded: input.E2EConfig.GetIntervals(specName, "wait-machine-upgrade"),
-				WaitForKubeProxyUpgrade:     input.E2EConfig.GetIntervals(specName, "wait-machine-upgrade"),
-				WaitForDNSUpgrade:           input.E2EConfig.GetIntervals(specName, "wait-machine-upgrade"),
-				WaitForEtcdUpgrade:          input.E2EConfig.GetIntervals(specName, "wait-machine-upgrade"),
+				ClusterProxy:                   selfHostedClusterProxy,
+				Cluster:                        clusterResources.Cluster,
+				ControlPlane:                   clusterResources.ControlPlane,
+				EtcdImageTag:                   etcdVersionUpgradeTo,
+				DNSImageTag:                    coreDNSVersionUpgradeTo,
+				MachineDeployments:             clusterResources.MachineDeployments,
+				MachinePools:                   clusterResources.MachinePools,
+				KubernetesUpgradeVersion:       input.E2EConfig.MustGetVariable(KubernetesVersionUpgradeTo),
+				WaitForMachinesToBeUpgraded:    input.E2EConfig.GetIntervals(specName, "wait-machine-upgrade"),
+				WaitForMachinePoolToBeUpgraded: input.E2EConfig.GetIntervals(specName, "wait-machine-pool-upgrade"),
+				WaitForKubeProxyUpgrade:        input.E2EConfig.GetIntervals(specName, "wait-machine-upgrade"),
+				WaitForDNSUpgrade:              input.E2EConfig.GetIntervals(specName, "wait-machine-upgrade"),
+				WaitForEtcdUpgrade:             input.E2EConfig.GetIntervals(specName, "wait-machine-upgrade"),
 			})
 		} else {
 			// Cluster is not using ClusterClass, upgrade via individual resources.
@@ -328,20 +363,20 @@ func SelfHostedSpec(ctx context.Context, inputGetter func() SelfHostedSpecInput)
 			)
 
 			if input.E2EConfig.HasVariable(CPMachineTemplateUpgradeTo) {
-				upgradeCPMachineTemplateTo = pointer.String(input.E2EConfig.GetVariable(CPMachineTemplateUpgradeTo))
+				upgradeCPMachineTemplateTo = ptr.To(input.E2EConfig.MustGetVariable(CPMachineTemplateUpgradeTo))
 			}
 
 			if input.E2EConfig.HasVariable(WorkersMachineTemplateUpgradeTo) {
-				upgradeWorkersMachineTemplateTo = pointer.String(input.E2EConfig.GetVariable(WorkersMachineTemplateUpgradeTo))
+				upgradeWorkersMachineTemplateTo = ptr.To(input.E2EConfig.MustGetVariable(WorkersMachineTemplateUpgradeTo))
 			}
 
 			framework.UpgradeControlPlaneAndWaitForUpgrade(ctx, framework.UpgradeControlPlaneAndWaitForUpgradeInput{
 				ClusterProxy:                selfHostedClusterProxy,
 				Cluster:                     clusterResources.Cluster,
 				ControlPlane:                clusterResources.ControlPlane,
-				EtcdImageTag:                input.E2EConfig.GetVariable(EtcdVersionUpgradeTo),
-				DNSImageTag:                 input.E2EConfig.GetVariable(CoreDNSVersionUpgradeTo),
-				KubernetesUpgradeVersion:    input.E2EConfig.GetVariable(KubernetesVersionUpgradeTo),
+				EtcdImageTag:                etcdVersionUpgradeTo,
+				DNSImageTag:                 coreDNSVersionUpgradeTo,
+				KubernetesUpgradeVersion:    input.E2EConfig.MustGetVariable(KubernetesVersionUpgradeTo),
 				UpgradeMachineTemplate:      upgradeCPMachineTemplateTo,
 				WaitForMachinesToBeUpgraded: input.E2EConfig.GetIntervals(specName, "wait-machine-upgrade"),
 				WaitForKubeProxyUpgrade:     input.E2EConfig.GetIntervals(specName, "wait-machine-upgrade"),
@@ -354,24 +389,23 @@ func SelfHostedSpec(ctx context.Context, inputGetter func() SelfHostedSpecInput)
 				framework.UpgradeMachineDeploymentsAndWait(ctx, framework.UpgradeMachineDeploymentsAndWaitInput{
 					ClusterProxy:                selfHostedClusterProxy,
 					Cluster:                     clusterResources.Cluster,
-					UpgradeVersion:              input.E2EConfig.GetVariable(KubernetesVersionUpgradeTo),
+					UpgradeVersion:              input.E2EConfig.MustGetVariable(KubernetesVersionUpgradeTo),
 					UpgradeMachineTemplate:      upgradeWorkersMachineTemplateTo,
 					MachineDeployments:          clusterResources.MachineDeployments,
 					WaitForMachinesToBeUpgraded: input.E2EConfig.GetIntervals(specName, "wait-worker-nodes"),
 				})
-			}
-		}
 
-		// Only attempt to upgrade MachinePools if they were provided in the template.
-		if len(clusterResources.MachinePools) > 0 && workerMachineCount > 0 {
-			By("Upgrading the machinepool instances")
-			framework.UpgradeMachinePoolAndWait(ctx, framework.UpgradeMachinePoolAndWaitInput{
-				ClusterProxy:                   selfHostedClusterProxy,
-				Cluster:                        clusterResources.Cluster,
-				UpgradeVersion:                 input.E2EConfig.GetVariable(KubernetesVersionUpgradeTo),
-				WaitForMachinePoolToBeUpgraded: input.E2EConfig.GetIntervals(specName, "wait-machine-pool-upgrade"),
-				MachinePools:                   clusterResources.MachinePools,
-			})
+				if len(clusterResources.MachinePools) > 0 {
+					By("Upgrading the machinepool instances")
+					framework.UpgradeMachinePoolAndWait(ctx, framework.UpgradeMachinePoolAndWaitInput{
+						ClusterProxy:                   selfHostedClusterProxy,
+						Cluster:                        clusterResources.Cluster,
+						UpgradeVersion:                 input.E2EConfig.MustGetVariable(KubernetesVersionUpgradeTo),
+						WaitForMachinePoolToBeUpgraded: input.E2EConfig.GetIntervals(specName, "wait-machine-pool-upgrade"),
+						MachinePools:                   clusterResources.MachinePools,
+					})
+				}
+			}
 		}
 
 		By("Waiting until nodes are ready")
@@ -379,7 +413,7 @@ func SelfHostedSpec(ctx context.Context, inputGetter func() SelfHostedSpecInput)
 		workloadClient := workloadProxy.GetClient()
 		framework.WaitForNodesReady(ctx, framework.WaitForNodesReadyInput{
 			Lister:            workloadClient,
-			KubernetesVersion: input.E2EConfig.GetVariable(KubernetesVersionUpgradeTo),
+			KubernetesVersion: input.E2EConfig.MustGetVariable(KubernetesVersionUpgradeTo),
 			Count:             int(clusterResources.ExpectedTotalNodes()),
 			WaitForNodesReady: input.E2EConfig.GetIntervals(specName, "wait-nodes-ready"),
 		})
@@ -390,11 +424,7 @@ func SelfHostedSpec(ctx context.Context, inputGetter func() SelfHostedSpecInput)
 	AfterEach(func() {
 		if selfHostedNamespace != nil {
 			// Dump all Cluster API related resources to artifacts before pivoting back.
-			framework.DumpAllResources(ctx, framework.DumpAllResourcesInput{
-				Lister:    selfHostedClusterProxy.GetClient(),
-				Namespace: namespace.Name,
-				LogPath:   filepath.Join(input.ArtifactFolder, "clusters", clusterResources.Cluster.Name, "resources"),
-			})
+			framework.DumpAllResourcesAndLogs(ctx, selfHostedClusterProxy, input.ArtifactFolder, namespace, clusterResources.Cluster)
 		}
 		if selfHostedCluster != nil {
 			By("Ensure API servers are stable before doing move")
@@ -404,11 +434,11 @@ func SelfHostedSpec(ctx context.Context, inputGetter func() SelfHostedSpecInput)
 			Consistently(func() error {
 				kubeSystem := &corev1.Namespace{}
 				return input.BootstrapClusterProxy.GetClient().Get(ctx, client.ObjectKey{Name: "kube-system"}, kubeSystem)
-			}, "5s", "100ms").Should(BeNil(), "Failed to assert bootstrap API server stability")
+			}, "5s", "100ms").Should(Succeed(), "Failed to assert bootstrap API server stability")
 			Consistently(func() error {
 				kubeSystem := &corev1.Namespace{}
 				return selfHostedClusterProxy.GetClient().Get(ctx, client.ObjectKey{Name: "kube-system"}, kubeSystem)
-			}, "5s", "100ms").Should(BeNil(), "Failed to assert self-hosted API server stability")
+			}, "5s", "100ms").Should(Succeed(), "Failed to assert self-hosted API server stability")
 
 			By("Moving the cluster back to bootstrap")
 			clusterctl.Move(ctx, clusterctl.MoveInput{
@@ -431,7 +461,7 @@ func SelfHostedSpec(ctx context.Context, inputGetter func() SelfHostedSpecInput)
 		}
 
 		// Dumps all the resources in the spec namespace, then cleanups the cluster object and the spec namespace itself.
-		dumpSpecResourcesAndCleanup(ctx, specName, input.BootstrapClusterProxy, input.ArtifactFolder, namespace, cancelWatches, clusterResources.Cluster, input.E2EConfig.GetIntervals, input.SkipCleanup)
+		framework.DumpSpecResourcesAndCleanup(ctx, specName, input.BootstrapClusterProxy, input.ArtifactFolder, namespace, cancelWatches, clusterResources.Cluster, input.E2EConfig.GetIntervals, input.SkipCleanup)
 	})
 }
 

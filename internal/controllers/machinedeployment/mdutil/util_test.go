@@ -30,10 +30,14 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apiserver/pkg/storage/names"
-	"k8s.io/klog/v2/klogr"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
+	ctrl "sigs.k8s.io/controller-runtime"
 
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
+)
+
+var (
+	ctx = ctrl.SetupSignalHandler()
 )
 
 func newDControllerRef(md *clusterv1.MachineDeployment) *metav1.OwnerReference {
@@ -78,7 +82,7 @@ func generateDeployment(image string) clusterv1.MachineDeployment {
 			Annotations: make(map[string]string),
 		},
 		Spec: clusterv1.MachineDeploymentSpec{
-			Replicas: pointer.Int32(3),
+			Replicas: ptr.To[int32](3),
 			Selector: metav1.LabelSelector{MatchLabels: machineLabels},
 			Template: clusterv1.MachineTemplateSpec{
 				ObjectMeta: clusterv1.ObjectMeta{
@@ -101,7 +105,7 @@ func TestMachineSetsByDecreasingReplicas(t *testing.T) {
 			Name:              "ms-a",
 		},
 		Spec: clusterv1.MachineSetSpec{
-			Replicas: pointer.Int32(1),
+			Replicas: ptr.To[int32](1),
 		},
 	}
 
@@ -111,7 +115,7 @@ func TestMachineSetsByDecreasingReplicas(t *testing.T) {
 			Name:              "ms-aa",
 		},
 		Spec: clusterv1.MachineSetSpec{
-			Replicas: pointer.Int32(3),
+			Replicas: ptr.To[int32](3),
 		},
 	}
 
@@ -121,7 +125,7 @@ func TestMachineSetsByDecreasingReplicas(t *testing.T) {
 			Name:              "ms-b",
 		},
 		Spec: clusterv1.MachineSetSpec{
-			Replicas: pointer.Int32(1),
+			Replicas: ptr.To[int32](1),
 		},
 	}
 
@@ -131,7 +135,7 @@ func TestMachineSetsByDecreasingReplicas(t *testing.T) {
 			Name:              "ms-a",
 		},
 		Spec: clusterv1.MachineSetSpec{
-			Replicas: pointer.Int32(1),
+			Replicas: ptr.To[int32](1),
 		},
 	}
 
@@ -162,12 +166,12 @@ func TestMachineSetsByDecreasingReplicas(t *testing.T) {
 			// sort the machine sets and verify the sorted list
 			g := NewWithT(t)
 			sort.Sort(MachineSetsByDecreasingReplicas(tt.machineSets))
-			g.Expect(tt.machineSets).To(Equal(tt.want))
+			g.Expect(tt.machineSets).To(BeComparableTo(tt.want))
 		})
 	}
 }
 
-func TestEqualMachineTemplate(t *testing.T) {
+func TestMachineTemplateUpToDate(t *testing.T) {
 	machineTemplate := &clusterv1.MachineTemplateSpec{
 		ObjectMeta: clusterv1.ObjectMeta{
 			Labels:      map[string]string{"l1": "v1"},
@@ -177,22 +181,27 @@ func TestEqualMachineTemplate(t *testing.T) {
 			NodeDrainTimeout:        &metav1.Duration{Duration: 10 * time.Second},
 			NodeDeletionTimeout:     &metav1.Duration{Duration: 10 * time.Second},
 			NodeVolumeDetachTimeout: &metav1.Duration{Duration: 10 * time.Second},
+			ClusterName:             "cluster1",
+			Version:                 ptr.To("v1.25.0"),
+			FailureDomain:           ptr.To("failure-domain1"),
 			InfrastructureRef: corev1.ObjectReference{
 				Name:       "infra1",
 				Namespace:  "default",
-				Kind:       "InfrastructureMachine",
+				Kind:       "InfrastructureMachineTemplate",
 				APIVersion: "infrastructure.cluster.x-k8s.io/v1beta1",
 			},
 			Bootstrap: clusterv1.Bootstrap{
 				ConfigRef: &corev1.ObjectReference{
 					Name:       "bootstrap1",
 					Namespace:  "default",
-					Kind:       "BootstrapConfig",
+					Kind:       "BootstrapConfigTemplate",
 					APIVersion: "bootstrap.cluster.x-k8s.io/v1beta1",
 				},
 			},
 		},
 	}
+
+	machineTemplateEqual := machineTemplate.DeepCopy()
 
 	machineTemplateWithEmptyLabels := machineTemplate.DeepCopy()
 	machineTemplateWithEmptyLabels.Labels = map[string]string{}
@@ -207,15 +216,32 @@ func TestEqualMachineTemplate(t *testing.T) {
 	machineTemplateWithDifferentAnnotations.Annotations = map[string]string{"a2": "v2"}
 
 	machineTemplateWithDifferentInPlaceMutableSpecFields := machineTemplate.DeepCopy()
+	machineTemplateWithDifferentInPlaceMutableSpecFields.Spec.ReadinessGates = []clusterv1.MachineReadinessGate{{ConditionType: "foo"}}
 	machineTemplateWithDifferentInPlaceMutableSpecFields.Spec.NodeDrainTimeout = &metav1.Duration{Duration: 20 * time.Second}
 	machineTemplateWithDifferentInPlaceMutableSpecFields.Spec.NodeDeletionTimeout = &metav1.Duration{Duration: 20 * time.Second}
 	machineTemplateWithDifferentInPlaceMutableSpecFields.Spec.NodeVolumeDetachTimeout = &metav1.Duration{Duration: 20 * time.Second}
+
+	machineTemplateWithDifferentClusterName := machineTemplate.DeepCopy()
+	machineTemplateWithDifferentClusterName.Spec.ClusterName = "cluster2"
+
+	machineTemplateWithDifferentVersion := machineTemplate.DeepCopy()
+	machineTemplateWithDifferentVersion.Spec.Version = ptr.To("v1.26.0")
+
+	machineTemplateWithDifferentFailureDomain := machineTemplate.DeepCopy()
+	machineTemplateWithDifferentFailureDomain.Spec.FailureDomain = ptr.To("failure-domain2")
 
 	machineTemplateWithDifferentInfraRef := machineTemplate.DeepCopy()
 	machineTemplateWithDifferentInfraRef.Spec.InfrastructureRef.Name = "infra2"
 
 	machineTemplateWithDifferentInfraRefAPIVersion := machineTemplate.DeepCopy()
 	machineTemplateWithDifferentInfraRefAPIVersion.Spec.InfrastructureRef.APIVersion = "infrastructure.cluster.x-k8s.io/v1beta2"
+
+	machineTemplateWithBootstrapDataSecret := machineTemplate.DeepCopy()
+	machineTemplateWithBootstrapDataSecret.Spec.Bootstrap.ConfigRef = nil
+	machineTemplateWithBootstrapDataSecret.Spec.Bootstrap.DataSecretName = ptr.To("data-secret1")
+
+	machineTemplateWithDifferentBootstrapDataSecret := machineTemplateWithBootstrapDataSecret.DeepCopy()
+	machineTemplateWithDifferentBootstrapDataSecret.Spec.Bootstrap.DataSecretName = ptr.To("data-secret2")
 
 	machineTemplateWithDifferentBootstrapConfigRef := machineTemplate.DeepCopy()
 	machineTemplateWithDifferentBootstrapConfigRef.Spec.Bootstrap.ConfigRef.Name = "bootstrap2"
@@ -224,63 +250,122 @@ func TestEqualMachineTemplate(t *testing.T) {
 	machineTemplateWithDifferentBootstrapConfigRefAPIVersion.Spec.Bootstrap.ConfigRef.APIVersion = "bootstrap.cluster.x-k8s.io/v1beta2"
 
 	tests := []struct {
-		Name           string
-		Former, Latter *clusterv1.MachineTemplateSpec
-		Expected       bool
+		Name                       string
+		current, desired           *clusterv1.MachineTemplateSpec
+		expectedUpToDate           bool
+		expectedLogMessages1       []string
+		expectedLogMessages2       []string
+		expectedConditionMessages1 []string
+		expectedConditionMessages2 []string
 	}{
 		{
-			Name:     "Same spec, except latter does not have labels",
-			Former:   machineTemplate,
-			Latter:   machineTemplateWithEmptyLabels,
-			Expected: true,
+			Name: "Same spec",
+			// Note: This test ensures that two MachineTemplates are equal even if the pointers differ.
+			current:          machineTemplate,
+			desired:          machineTemplateEqual,
+			expectedUpToDate: true,
 		},
 		{
-			Name:     "Same spec, except latter has different labels",
-			Former:   machineTemplate,
-			Latter:   machineTemplateWithDifferentLabels,
-			Expected: true,
+			Name:             "Same spec, except desired does not have labels",
+			current:          machineTemplate,
+			desired:          machineTemplateWithEmptyLabels,
+			expectedUpToDate: true,
 		},
 		{
-			Name:     "Same spec, except latter does not have annotations",
-			Former:   machineTemplate,
-			Latter:   machineTemplateWithEmptyAnnotations,
-			Expected: true,
+			Name:             "Same spec, except desired has different labels",
+			current:          machineTemplate,
+			desired:          machineTemplateWithDifferentLabels,
+			expectedUpToDate: true,
 		},
 		{
-			Name:     "Same spec, except latter has different annotations",
-			Former:   machineTemplate,
-			Latter:   machineTemplateWithDifferentAnnotations,
-			Expected: true,
+			Name:             "Same spec, except desired does not have annotations",
+			current:          machineTemplate,
+			desired:          machineTemplateWithEmptyAnnotations,
+			expectedUpToDate: true,
 		},
 		{
-			Name:     "Spec changes, latter has different in-place mutable spec fields",
-			Former:   machineTemplate,
-			Latter:   machineTemplateWithDifferentInPlaceMutableSpecFields,
-			Expected: true,
+			Name:             "Same spec, except desired has different annotations",
+			current:          machineTemplate,
+			desired:          machineTemplateWithDifferentAnnotations,
+			expectedUpToDate: true,
 		},
 		{
-			Name:     "Spec changes, latter has different InfrastructureRef",
-			Former:   machineTemplate,
-			Latter:   machineTemplateWithDifferentInfraRef,
-			Expected: false,
+			Name:             "Spec changes, desired has different in-place mutable spec fields",
+			current:          machineTemplate,
+			desired:          machineTemplateWithDifferentInPlaceMutableSpecFields,
+			expectedUpToDate: true,
 		},
 		{
-			Name:     "Spec changes, latter has different Bootstrap.ConfigRef",
-			Former:   machineTemplate,
-			Latter:   machineTemplateWithDifferentBootstrapConfigRef,
-			Expected: false,
+			Name:                       "Spec changes, desired has different Version",
+			current:                    machineTemplate,
+			desired:                    machineTemplateWithDifferentVersion,
+			expectedUpToDate:           false,
+			expectedLogMessages1:       []string{"spec.version v1.25.0, v1.26.0 required"},
+			expectedLogMessages2:       []string{"spec.version v1.26.0, v1.25.0 required"},
+			expectedConditionMessages1: []string{"Version v1.25.0, v1.26.0 required"},
+			expectedConditionMessages2: []string{"Version v1.26.0, v1.25.0 required"},
 		},
 		{
-			Name:     "Same spec, except latter has different InfrastructureRef APIVersion",
-			Former:   machineTemplate,
-			Latter:   machineTemplateWithDifferentInfraRefAPIVersion,
-			Expected: true,
+			Name:                       "Spec changes, desired has different FailureDomain",
+			current:                    machineTemplate,
+			desired:                    machineTemplateWithDifferentFailureDomain,
+			expectedUpToDate:           false,
+			expectedLogMessages1:       []string{"spec.failureDomain failure-domain1, failure-domain2 required"},
+			expectedLogMessages2:       []string{"spec.failureDomain failure-domain2, failure-domain1 required"},
+			expectedConditionMessages1: []string{"Failure domain failure-domain1, failure-domain2 required"},
+			expectedConditionMessages2: []string{"Failure domain failure-domain2, failure-domain1 required"},
 		},
 		{
-			Name:     "Same spec, except latter has different Bootstrap.ConfigRef APIVersion",
-			Former:   machineTemplate,
-			Latter:   machineTemplateWithDifferentBootstrapConfigRefAPIVersion,
-			Expected: true,
+			Name:                       "Spec changes, desired has different InfrastructureRef",
+			current:                    machineTemplate,
+			desired:                    machineTemplateWithDifferentInfraRef,
+			expectedUpToDate:           false,
+			expectedLogMessages1:       []string{"spec.infrastructureRef InfrastructureMachineTemplate infra1, InfrastructureMachineTemplate infra2 required"},
+			expectedLogMessages2:       []string{"spec.infrastructureRef InfrastructureMachineTemplate infra2, InfrastructureMachineTemplate infra1 required"},
+			expectedConditionMessages1: []string{"InfrastructureMachine is not up-to-date"},
+			expectedConditionMessages2: []string{"InfrastructureMachine is not up-to-date"},
+		},
+		{
+			Name:                       "Spec changes, desired has different Bootstrap data secret",
+			current:                    machineTemplateWithBootstrapDataSecret,
+			desired:                    machineTemplateWithDifferentBootstrapDataSecret,
+			expectedUpToDate:           false,
+			expectedLogMessages1:       []string{"spec.bootstrap.dataSecretName data-secret1, data-secret2 required"},
+			expectedLogMessages2:       []string{"spec.bootstrap.dataSecretName data-secret2, data-secret1 required"},
+			expectedConditionMessages1: []string{"spec.bootstrap.dataSecretName data-secret1, data-secret2 required"},
+			expectedConditionMessages2: []string{"spec.bootstrap.dataSecretName data-secret2, data-secret1 required"},
+		},
+		{
+			Name:                       "Spec changes, desired has different Bootstrap.ConfigRef",
+			current:                    machineTemplate,
+			desired:                    machineTemplateWithDifferentBootstrapConfigRef,
+			expectedUpToDate:           false,
+			expectedLogMessages1:       []string{"spec.bootstrap.configRef BootstrapConfigTemplate bootstrap1, BootstrapConfigTemplate bootstrap2 required"},
+			expectedLogMessages2:       []string{"spec.bootstrap.configRef BootstrapConfigTemplate bootstrap2, BootstrapConfigTemplate bootstrap1 required"},
+			expectedConditionMessages1: []string{"BootstrapConfig is not up-to-date"},
+			expectedConditionMessages2: []string{"BootstrapConfig is not up-to-date"},
+		},
+		{
+			Name:                       "Spec changes, desired has data secret instead of Bootstrap.ConfigRef",
+			current:                    machineTemplate,
+			desired:                    machineTemplateWithBootstrapDataSecret,
+			expectedUpToDate:           false,
+			expectedLogMessages1:       []string{"spec.bootstrap.configRef BootstrapConfigTemplate bootstrap1,   required"},
+			expectedLogMessages2:       []string{"spec.bootstrap.dataSecretName data-secret1, nil required"},
+			expectedConditionMessages1: []string{"BootstrapConfig is not up-to-date"},
+			expectedConditionMessages2: []string{"spec.bootstrap.dataSecretName data-secret1, nil required"},
+		},
+		{
+			Name:             "Same spec, except desired has different InfrastructureRef APIVersion",
+			current:          machineTemplate,
+			desired:          machineTemplateWithDifferentInfraRefAPIVersion,
+			expectedUpToDate: true,
+		},
+		{
+			Name:             "Same spec, except desired has different Bootstrap.ConfigRef APIVersion",
+			current:          machineTemplate,
+			desired:          machineTemplateWithDifferentBootstrapConfigRefAPIVersion,
+			expectedUpToDate: true,
 		},
 	}
 
@@ -288,17 +373,19 @@ func TestEqualMachineTemplate(t *testing.T) {
 		t.Run(test.Name, func(t *testing.T) {
 			g := NewWithT(t)
 
-			runTest := func(t1, t2 *clusterv1.MachineTemplateSpec) {
+			runTest := func(t1, t2 *clusterv1.MachineTemplateSpec, expectedLogMessages, expectedConditionMessages []string) {
 				// Run
-				equal := EqualMachineTemplate(t1, t2)
-				g.Expect(equal).To(Equal(test.Expected))
+				upToDate, logMessages, conditionMessages := MachineTemplateUpToDate(t1, t2)
+				g.Expect(upToDate).To(Equal(test.expectedUpToDate))
+				g.Expect(logMessages).To(Equal(expectedLogMessages))
+				g.Expect(conditionMessages).To(Equal(expectedConditionMessages))
 				g.Expect(t1.Labels).NotTo(BeNil())
 				g.Expect(t2.Labels).NotTo(BeNil())
 			}
 
-			runTest(test.Former, test.Latter)
+			runTest(test.current, test.desired, test.expectedLogMessages1, test.expectedConditionMessages1)
 			// Test the same case in reverse order
-			runTest(test.Latter, test.Former)
+			runTest(test.desired, test.current, test.expectedLogMessages2, test.expectedConditionMessages2)
 		})
 	}
 }
@@ -311,18 +398,22 @@ func TestFindNewMachineSet(t *testing.T) {
 	twoAfterRolloutAfter := metav1.NewTime(oneAfterRolloutAfter.Add(time.Minute))
 
 	deployment := generateDeployment("nginx")
-	deployment.Spec.RolloutAfter = &rolloutAfter
+	deployment.Spec.Template.Spec.InfrastructureRef.Kind = "InfrastructureMachineTemplate"
+	deployment.Spec.Template.Spec.InfrastructureRef.Name = "new-infra-ref"
+
+	deploymentWithRolloutAfter := deployment.DeepCopy()
+	deploymentWithRolloutAfter.Spec.RolloutAfter = &rolloutAfter
 
 	matchingMS := generateMS(deployment)
 
 	matchingMSHigherReplicas := generateMS(deployment)
-	matchingMSHigherReplicas.Spec.Replicas = pointer.Int32(2)
+	matchingMSHigherReplicas.Spec.Replicas = ptr.To[int32](2)
 
 	matchingMSDiffersInPlaceMutableFields := generateMS(deployment)
 	matchingMSDiffersInPlaceMutableFields.Spec.Template.Spec.NodeDrainTimeout = &metav1.Duration{Duration: 20 * time.Second}
 
 	oldMS := generateMS(deployment)
-	oldMS.Spec.Template.Spec.InfrastructureRef.Name = "changed-infra-ref"
+	oldMS.Spec.Template.Spec.InfrastructureRef.Name = "old-infra-ref"
 
 	msCreatedTwoBeforeRolloutAfter := generateMS(deployment)
 	msCreatedTwoBeforeRolloutAfter.CreationTimestamp = twoBeforeRolloutAfter
@@ -336,7 +427,15 @@ func TestFindNewMachineSet(t *testing.T) {
 		msList             []*clusterv1.MachineSet
 		reconciliationTime *metav1.Time
 		expected           *clusterv1.MachineSet
+		createReason       string
 	}{
+		{
+			Name:         "Get nil if no MachineSets exist",
+			deployment:   deployment,
+			msList:       []*clusterv1.MachineSet{},
+			expected:     nil,
+			createReason: "no MachineSets exist for the MachineDeployment",
+		},
 		{
 			Name:       "Get the MachineSet with the MachineTemplate that matches the intent of the MachineDeployment",
 			deployment: deployment,
@@ -356,40 +455,52 @@ func TestFindNewMachineSet(t *testing.T) {
 			expected:   &matchingMSDiffersInPlaceMutableFields,
 		},
 		{
-			Name:       "Get nil if no MachineSet matches the desired intent of the MachineDeployment",
-			deployment: deployment,
-			msList:     []*clusterv1.MachineSet{&oldMS},
-			expected:   nil,
+			Name:         "Get nil if no MachineSet matches the desired intent of the MachineDeployment",
+			deployment:   deployment,
+			msList:       []*clusterv1.MachineSet{&oldMS},
+			expected:     nil,
+			createReason: fmt.Sprintf(`couldn't find MachineSet matching MachineDeployment spec template: MachineSet %s: diff: spec.infrastructureRef InfrastructureMachineTemplate old-infra-ref, InfrastructureMachineTemplate new-infra-ref required`, oldMS.Name),
 		},
 		{
 			Name:               "Get the MachineSet if reconciliationTime < rolloutAfter",
-			deployment:         deployment,
+			deployment:         *deploymentWithRolloutAfter,
 			msList:             []*clusterv1.MachineSet{&msCreatedTwoBeforeRolloutAfter},
 			reconciliationTime: &oneBeforeRolloutAfter,
 			expected:           &msCreatedTwoBeforeRolloutAfter,
 		},
 		{
 			Name:               "Get nil if reconciliationTime is > rolloutAfter and no MachineSet is created after rolloutAfter",
-			deployment:         deployment,
+			deployment:         *deploymentWithRolloutAfter,
 			msList:             []*clusterv1.MachineSet{&msCreatedTwoBeforeRolloutAfter},
 			reconciliationTime: &oneAfterRolloutAfter,
 			expected:           nil,
+			createReason:       fmt.Sprintf("RolloutAfter on MachineDeployment set to %s, no MachineSet has been created afterwards", rolloutAfter.Format(time.RFC3339)),
 		},
 		{
 			Name:               "Get MachineSet created after RolloutAfter if reconciliationTime is > rolloutAfter",
-			deployment:         deployment,
+			deployment:         *deploymentWithRolloutAfter,
 			msList:             []*clusterv1.MachineSet{&msCreatedAfterRolloutAfter, &msCreatedTwoBeforeRolloutAfter},
+			reconciliationTime: &twoAfterRolloutAfter,
+			expected:           &msCreatedAfterRolloutAfter,
+		},
+		{
+			Name:               "Get MachineSet created after RolloutAfter if reconciliationTime is > rolloutAfter (inverse order in ms list)",
+			deployment:         *deploymentWithRolloutAfter,
+			msList:             []*clusterv1.MachineSet{&msCreatedTwoBeforeRolloutAfter, &msCreatedAfterRolloutAfter},
 			reconciliationTime: &twoAfterRolloutAfter,
 			expected:           &msCreatedAfterRolloutAfter,
 		},
 	}
 
-	for _, test := range tests {
+	for i := range tests {
+		test := tests[i]
 		t.Run(test.Name, func(t *testing.T) {
 			g := NewWithT(t)
 
-			ms := FindNewMachineSet(&test.deployment, test.msList, test.reconciliationTime)
-			g.Expect(ms).To(Equal(test.expected))
+			ms, createReason, err := FindNewMachineSet(&test.deployment, test.msList, test.reconciliationTime)
+			g.Expect(err).To(Not(HaveOccurred()))
+			g.Expect(ms).To(BeComparableTo(test.expected))
+			g.Expect(createReason).To(BeComparableTo(test.createReason))
 		})
 	}
 }
@@ -402,17 +513,19 @@ func TestFindOldMachineSets(t *testing.T) {
 	twoAfterRolloutAfter := metav1.NewTime(oneAfterRolloutAfter.Add(time.Minute))
 
 	deployment := generateDeployment("nginx")
-	deployment.Spec.RolloutAfter = &rolloutAfter
+
+	deploymentWithRolloutAfter := deployment.DeepCopy()
+	deploymentWithRolloutAfter.Spec.RolloutAfter = &rolloutAfter
 
 	newMS := generateMS(deployment)
 	newMS.Name = "aa"
-	newMS.Spec.Replicas = pointer.Int32(1)
+	newMS.Spec.Replicas = ptr.To[int32](1)
 
 	newMSHigherReplicas := generateMS(deployment)
-	newMSHigherReplicas.Spec.Replicas = pointer.Int32(2)
+	newMSHigherReplicas.Spec.Replicas = ptr.To[int32](2)
 
 	newMSHigherName := generateMS(deployment)
-	newMSHigherName.Spec.Replicas = pointer.Int32(1)
+	newMSHigherName.Spec.Replicas = ptr.To[int32](1)
 	newMSHigherName.Name = "ab"
 
 	oldDeployment := generateDeployment("nginx")
@@ -463,26 +576,34 @@ func TestFindOldMachineSets(t *testing.T) {
 			expected:   []*clusterv1.MachineSet{},
 		},
 		{
+			Name:       "Get empty old MachineSets if no MachineSets exist",
+			deployment: deployment,
+			msList:     []*clusterv1.MachineSet{},
+			expected:   []*clusterv1.MachineSet{},
+		},
+		{
 			Name:               "Get old MachineSets with new MachineSets, MachineSets created before rolloutAfter are considered new when reconciliationTime < rolloutAfter",
-			deployment:         deployment,
+			deployment:         *deploymentWithRolloutAfter,
 			msList:             []*clusterv1.MachineSet{&msCreatedTwoBeforeRolloutAfter},
 			reconciliationTime: &oneBeforeRolloutAfter,
 			expected:           nil,
 		},
 		{
 			Name:               "Get old MachineSets with new MachineSets, MachineSets created after rolloutAfter are considered new when reconciliationTime > rolloutAfter",
-			deployment:         deployment,
+			deployment:         *deploymentWithRolloutAfter,
 			msList:             []*clusterv1.MachineSet{&msCreatedTwoBeforeRolloutAfter, &msCreatedAfterRolloutAfter},
 			reconciliationTime: &twoAfterRolloutAfter,
 			expected:           []*clusterv1.MachineSet{&msCreatedTwoBeforeRolloutAfter},
 		},
 	}
 
-	for _, test := range tests {
+	for i := range tests {
+		test := tests[i]
 		t.Run(test.Name, func(t *testing.T) {
 			g := NewWithT(t)
 
-			allMS := FindOldMachineSets(&test.deployment, test.msList, test.reconciliationTime)
+			allMS, err := FindOldMachineSets(&test.deployment, test.msList, test.reconciliationTime)
+			g.Expect(err).ToNot(HaveOccurred())
 			g.Expect(allMS).To(ConsistOf(test.expected))
 		})
 	}
@@ -716,7 +837,8 @@ func TestDeploymentComplete(t *testing.T) {
 		},
 	}
 
-	for _, test := range tests {
+	for i := range tests {
+		test := tests[i]
 		t.Run(test.name, func(t *testing.T) {
 			g := NewWithT(t)
 
@@ -795,7 +917,7 @@ func TestMaxUnavailable(t *testing.T) {
 func TestAnnotationUtils(t *testing.T) {
 	// Setup
 	tDeployment := generateDeployment("nginx")
-	tDeployment.Spec.Replicas = pointer.Int32(1)
+	tDeployment.Spec.Replicas = ptr.To[int32](1)
 	tMS := generateMS(tDeployment)
 
 	// Test Case 1:  Check if annotations are set properly
@@ -822,7 +944,7 @@ func TestAnnotationUtils(t *testing.T) {
 
 func TestComputeMachineSetAnnotations(t *testing.T) {
 	deployment := generateDeployment("nginx")
-	deployment.Spec.Replicas = pointer.Int32(3)
+	deployment.Spec.Replicas = ptr.To[int32](3)
 	maxSurge := intstr.FromInt(1)
 	maxUnavailable := intstr.FromInt(0)
 	deployment.Spec.Strategy = &clusterv1.MachineDeploymentStrategy{
@@ -936,11 +1058,10 @@ func TestComputeMachineSetAnnotations(t *testing.T) {
 		},
 	}
 
-	log := klogr.New()
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			g := NewWithT(t)
-			got, err := ComputeMachineSetAnnotations(log, tt.deployment, tt.oldMSs, tt.ms)
+			got, err := ComputeMachineSetAnnotations(ctx, tt.deployment, tt.oldMSs, tt.ms)
 			if tt.wantErr {
 				g.Expect(err).ShouldNot(HaveOccurred())
 			} else {

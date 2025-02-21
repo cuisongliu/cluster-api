@@ -40,10 +40,12 @@
 
 from __future__ import unicode_literals
 
+import sys
 import errno
 import json
 import os
 import subprocess
+import urllib.request
 from distutils.dir_util import copy_tree
 from distutils.file_util import copy_file
 
@@ -52,41 +54,34 @@ settings = {}
 providers = {
     'cluster-api': {
         'componentsFile': 'core-components.yaml',
-        'nextVersion': 'v1.5.99',
+        'nextVersion': 'v1.10.99',
         'type': 'CoreProvider',
     },
     'bootstrap-kubeadm': {
         'componentsFile': 'bootstrap-components.yaml',
-        'nextVersion': 'v1.5.99',
+        'nextVersion': 'v1.10.99',
         'type': 'BootstrapProvider',
         'configFolder': 'bootstrap/kubeadm/config/default',
     },
     'control-plane-kubeadm': {
         'componentsFile': 'control-plane-components.yaml',
-        'nextVersion': 'v1.5.99',
+        'nextVersion': 'v1.10.99',
         'type': 'ControlPlaneProvider',
         'configFolder': 'controlplane/kubeadm/config/default',
     },
     'infrastructure-docker': {
-        'componentsFile': 'infrastructure-components.yaml',
-        'nextVersion': 'v1.5.99',
+        'componentsFile': 'infrastructure-components-development.yaml',
+        'nextVersion': 'v1.10.99',
         'type': 'InfrastructureProvider',
         'configFolder': 'test/infrastructure/docker/config/default',
     },
-    'infrastructure-in-memory': {
-          'componentsFile': 'infrastructure-components.yaml',
-          'nextVersion': 'v1.5.99',
-          'type': 'InfrastructureProvider',
-          'configFolder': 'test/infrastructure/inmemory/config/default',
-      },
-      'runtime-extension-test': {
-        'componentsFile': 'runtime-extension-components.yaml',
-        'nextVersion': 'v1.5.99',
+    'runtime-extension-test': {
+        'componentsFile': 'runtime-extension-components-development.yaml',
+        'nextVersion': 'v1.10.99',
         'type': 'RuntimeExtensionProvider',
         'configFolder': 'test/extension/config/default',
     },
 }
-
 
 def load_settings():
     global settings
@@ -154,9 +149,6 @@ def write_local_repository(provider, version, components_file, components_yaml, 
         if provider == "infrastructure-docker":
             copy_tree("test/infrastructure/docker/templates", provider_folder)
 
-        if provider == "infrastructure-in-memory":
-            copy_tree("test/infrastructure/inmemory/templates", provider_folder)
-
         return components_path
     except Exception as e:
         raise Exception('failed to write {} to {}: {}'.format(components_file, provider_folder, e))
@@ -166,6 +158,9 @@ def create_local_repositories():
     providerList = settings.get('providers', [])
     assert providerList is not None, 'invalid configuration: please define the list of providers to override'
     assert len(providerList)>0, 'invalid configuration: please define at least one provider to override'
+
+    if len(sys.argv) == 1:
+        execCmd(['make', 'kustomize'])
 
     for provider in providerList:
         p = providers.get(provider)
@@ -188,10 +183,14 @@ def create_local_repositories():
         assert components_file is not None, 'invalid configuration for provider {}: please provide componentsFile value'.format(
             provider)
 
-        execCmd(['make', 'kustomize'])
-        components_yaml = execCmd(['./hack/tools/bin/kustomize', 'build', os.path.join(repo, config_folder)])
+        if len(sys.argv) > 1:
+            url = "{}/{}".format(sys.argv[1], components_file)
+            components_yaml = urllib.request.urlopen(url).read()
+        else:
+            components_yaml = execCmd(['./hack/tools/bin/kustomize', 'build', os.path.join(repo, config_folder)])
+
         components_path = write_local_repository(provider, next_version, components_file, components_yaml,
-                                                 metadata_file)
+                                                     metadata_file)
 
         yield name, type, next_version, components_path
 
@@ -289,16 +288,16 @@ def print_instructions(repos):
     cmd = "clusterctl init \\\n"
     for name, type, next_version, components_path in repos:
         cmd += "   {} {}:{} \\\n".format(type_to_flag(type), name, next_version)
-    cmd += "   --config $XDG_CONFIG_HOME/cluster-api/dev-repository/config.yaml"
+    config_dir = os.getenv("XDG_CONFIG_HOME", "")
+    if config_dir != "":
+        cmd += "   --config $XDG_CONFIG_HOME/cluster-api/dev-repository/config.yaml"
+    else:
+        cmd += "   --config $HOME/.config/cluster-api/dev-repository/config.yaml"
     print(cmd)
     print
     if 'infrastructure-docker' in providerList:
         print('please check the documentation for additional steps required for using the docker provider')
         print
-    if 'infrastructure-in-memory' in providerList:
-        print ('please check the documentation for additional steps required for using the in-memory provider')
-        print
-
 
 load_settings()
 

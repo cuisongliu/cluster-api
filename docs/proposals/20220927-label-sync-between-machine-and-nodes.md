@@ -17,6 +17,33 @@ superseded-by:
 
 # Label Sync Between Machines and underlying Kubernetes Nodes
 
+## Table of Contents
+
+<!-- START doctoc generated TOC please keep comment here to allow auto update -->
+<!-- DON'T EDIT THIS SECTION, INSTEAD RE-RUN doctoc TO UPDATE -->
+
+- [Glossary](#glossary)
+- [Summary](#summary)
+- [Motivation](#motivation)
+  - [Goals](#goals)
+  - [Non-Goals](#non-goals)
+- [Proposal](#proposal)
+  - [User Stories](#user-stories)
+    - [Story 1](#story-1)
+    - [Story 2](#story-2)
+    - [Story 3](#story-3)
+  - [Implementation Details/Notes/Constraints](#implementation-detailsnotesconstraints)
+  - [Label domains & prefixes](#label-domains--prefixes)
+    - [Synchronization of CAPI Labels](#synchronization-of-capi-labels)
+    - [Delay between Node Create and Label Sync](#delay-between-node-create-and-label-sync)
+- [Alternatives](#alternatives)
+  - [Use KubeadmConfigTemplate capabilities](#use-kubeadmconfigtemplate-capabilities)
+  - [Apply labels using kubectl](#apply-labels-using-kubectl)
+  - [Apply label using external label synchronizer tools](#apply-label-using-external-label-synchronizer-tools)
+- [Implementation History](#implementation-history)
+
+<!-- END doctoc generated TOC please keep comment here to allow auto update -->
+
 ## Glossary
 
 Refer to the [Cluster API Book Glossary](https://cluster-api.sigs.k8s.io/reference/glossary.html).
@@ -41,6 +68,7 @@ With the "divide and conquer" principle in mind this proposal aims to address th
 
 - Support label sync from Machine to the linked Kubernetes node, limited to `node-role.kubernetes.io/` prefix and the `node-restriction.kubernetes.io` domain.
 - Support syncing labels from Machine to the linked Kubernetes node for the Cluster API owned `node.cluster.x-k8s.io` domain.
+- Support a flag to sync additional user configured labels from the Machine to the Node.
 
 ### Non-Goals
 
@@ -71,7 +99,9 @@ While designing a solution for syncing labels between Machine and underlying Kub
 
 ### Label domains & prefixes
 
-The idea of scoping synchronization to a well defined set of labels is a first answer to security/concurrency concerns; labels to be managed by Cluster API have been selected based on following criteria:
+A default list of labels would always be synced from the Machines to the Nodes. An additional list of labels can be synced from the Machine to the Node by providing a list of regexes as a flag to the manager. 
+
+The following is the default list of label domains that would always be sync from Machines to Nodes:
 
 - The `node-role.kubernetes.io` label has been used widely in the past to identify the role of a Kubernetes Node (e.g. `node-role.kubernetes.io/worker=''`). For example, `kubectl get node` looks for this specific label when displaying the role to the user.
 
@@ -136,3 +166,4 @@ Users could also implement their own label synchronizer in their tooling, but th
 
 - [ ] 09/27/2022: First Draft of this document
 - [ ] 09/28/2022: First Draft of this document presented in the Cluster API office hours meeting
+- [ ] 01/09/2025: Update to support configurable label syncing Ref:[11657](https://github.com/kubernetes-sigs/cluster-api/issues/11657) 

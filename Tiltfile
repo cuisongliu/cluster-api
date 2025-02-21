@@ -1,9 +1,8 @@
 # -*- mode: Python -*-
 
-envsubst_cmd = "./hack/tools/bin/envsubst"
 clusterctl_cmd = "./bin/clusterctl"
 kubectl_cmd = "kubectl"
-kubernetes_version = "v1.27.3"
+kubernetes_version = "v1.31.2"
 
 load("ext://uibutton", "cmd_button", "location", "text_input")
 
@@ -53,10 +52,12 @@ if not usingLocalRegistry:
 if settings.get("default_registry", "") != "":
     default_registry(settings.get("default_registry"))
 
-always_enable_providers = ["core"]
+core_provider_name = "core"
+
+default_enable_providers = [core_provider_name]
 
 providers = {
-    "core": {
+    core_provider_name: {
         "context": ".",  # NOTE: this should be kept in sync with corresponding setting in tilt-prepare
         "image": "gcr.io/k8s-staging-cluster-api/cluster-api-controller",
         "live_reload_deps": [
@@ -118,19 +119,6 @@ providers = {
         ],
         "label": "CAPD",
     },
-    "in-memory": {
-        "context": "test/infrastructure/inmemory",  # NOTE: this should be kept in sync with corresponding setting in tilt-prepare
-        "image": "gcr.io/k8s-staging-cluster-api/capim-manager",
-        "live_reload_deps": [
-            "main.go",
-            "../../go.mod",
-            "../../go.sum",
-            "api",
-            "controllers",
-            "internal",
-        ],
-        "label": "CAPIM",
-    },
     "test-extension": {
         "context": "test/extension",  # NOTE: this should be kept in sync with corresponding setting in tilt-prepare
         "image": "gcr.io/k8s-staging-cluster-api/test-extension",
@@ -161,7 +149,7 @@ providers = {
 #     }
 # }
 
-def load_provider_tiltfiles():
+def load_provider_tilt_files():
     provider_repos = settings.get("provider_repos", [])
 
     for repo in provider_repos:
@@ -184,9 +172,9 @@ def load_provider_tiltfiles():
 
 tilt_helper_dockerfile_header = """
 # Tilt image
-FROM golang:1.20.4 as tilt-helper
+FROM golang:1.23.6 as tilt-helper
 # Install delve. Note this should be kept in step with the Go release minor version.
-RUN go install github.com/go-delve/delve/cmd/dlv@v1.20
+RUN go install github.com/go-delve/delve/cmd/dlv@v1.23
 # Support live reloading with Tilt
 RUN wget --output-document /restart.sh --quiet https://raw.githubusercontent.com/tilt-dev/rerun-process-wrapper/master/restart.sh  && \
     wget --output-document /start.sh --quiet https://raw.githubusercontent.com/tilt-dev/rerun-process-wrapper/master/start.sh && \
@@ -195,7 +183,7 @@ RUN wget --output-document /restart.sh --quiet https://raw.githubusercontent.com
 """
 
 tilt_dockerfile_header = """
-FROM gcr.io/distroless/base:debug as tilt
+FROM golang:1.23.6 as tilt
 WORKDIR /
 COPY --from=tilt-helper /process.txt .
 COPY --from=tilt-helper /start.sh .
@@ -248,9 +236,15 @@ def build_go_binary(context, reload_deps, debug, go_main, binary_name, label):
     live_reload_deps = []
     for d in reload_deps:
         live_reload_deps.append(context + "/" + d)
+
+    # Ensure the {context}/.tiltbuild/bin directory before any other resources
+    # `local` is evaluated immediately, other resources are executed later in the startup/when triggered
+    local("mkdir -p {context}/.tiltbuild/bin".format(context = shlex.quote(context)), quiet = True)
+
+    # Build the go binary
     local_resource(
         label.lower() + "_binary",
-        cmd = "cd {context};mkdir -p .tiltbuild/bin;{build_cmd}".format(
+        cmd = "cd {context};{build_cmd}".format(
             context = context,
             build_cmd = build_cmd,
         ),
@@ -336,23 +330,24 @@ def enable_provider(name, debug):
 
     port_forwards, links = get_port_forwards(debug)
 
-    build_go_binary(
-        context = p.get("context"),
-        reload_deps = p.get("live_reload_deps"),
-        debug = debug,
-        go_main = p.get("go_main", "main.go"),
-        binary_name = "manager",
-        label = label,
-    )
+    if p.get("image"):
+        build_go_binary(
+            context = p.get("context"),
+            reload_deps = p.get("live_reload_deps"),
+            debug = debug,
+            go_main = p.get("go_main", "main.go"),
+            binary_name = "manager",
+            label = label,
+        )
 
-    build_docker_image(
-        image = p.get("image"),
-        context = p.get("context"),
-        binary_name = "manager",
-        additional_docker_helper_commands = p.get("additional_docker_helper_commands", ""),
-        additional_docker_build_commands = p.get("additional_docker_build_commands", ""),
-        port_forwards = port_forwards,
-    )
+        build_docker_image(
+            image = p.get("image"),
+            context = p.get("context"),
+            binary_name = "manager",
+            additional_docker_helper_commands = p.get("additional_docker_helper_commands", ""),
+            additional_docker_build_commands = p.get("additional_docker_build_commands", ""),
+            port_forwards = port_forwards,
+        )
 
     additional_objs = []
     p_resources = p.get("additional_resources", [])
@@ -360,9 +355,9 @@ def enable_provider(name, debug):
         k8s_yaml(p.get("context") + "/" + resource)
         additional_objs = additional_objs + decode_yaml_stream(read_file(p.get("context") + "/" + resource))
 
-    if p.get("kustomize_config", True):
+    if p.get("apply_provider_yaml", True):
         yaml = read_file("./.tiltbuild/yaml/{}.provider.yaml".format(name))
-        k8s_yaml(yaml)
+        k8s_yaml(yaml, allow_duplicates = True)
         objs = decode_yaml_stream(yaml)
         k8s_resource(
             workload = find_object_name(objs, "Deployment"),
@@ -376,7 +371,8 @@ def enable_provider(name, debug):
 
 def find_object_name(objs, kind):
     for o in objs:
-        if o["kind"] == kind:
+        # Ignore objects that are not part of the provider, e.g. the ASO Deployment in CAPZ.
+        if o["kind"] == kind and "cluster.x-k8s.io/provider" in o["metadata"]["labels"]:
             return o["metadata"]["name"]
     return ""
 
@@ -398,8 +394,8 @@ def find_all_objects_names(objs):
 # Users may define their own Tilt customizations in tilt.d. This directory is excluded from git and these files will
 # not be checked in to version control.
 def include_user_tilt_files():
-    user_tiltfiles = listdir("tilt.d")
-    for f in user_tiltfiles:
+    user_tilt_files = listdir("tilt.d")
+    for f in user_tilt_files:
         include(f)
 
 # Enable core cluster-api plus everything listed in 'enable_providers' in tilt-settings.json
@@ -409,7 +405,10 @@ def enable_providers():
 
 def get_providers():
     user_enable_providers = settings.get("enable_providers", [])
-    return {k: "" for k in user_enable_providers + always_enable_providers}.keys()
+    all_providers = set(user_enable_providers) | set(default_enable_providers)
+    if not settings.get("enable_core_provider", True):
+        return all_providers - set([core_provider_name])
+    return all_providers
 
 def deploy_provider_crds():
     # NOTE: we are applying raw yaml for clusterctl resources (vs delegating this to clusterctl methods) because
@@ -431,7 +430,7 @@ def deploy_observability():
 
         cmd_button(
             "loki:import logs",
-            argv = ["sh", "-c", "cd ./hack/tools/log-push && go run ./main.go --log-path=$LOG_PATH"],
+            argv = ["sh", "-c", "cd ./hack/tools/internal/log-push && go run ./main.go --log-path=$LOG_PATH"],
             resource = "loki",
             icon_name = "import_export",
             text = "Import logs",
@@ -476,8 +475,21 @@ def deploy_observability():
             objects = ["capi-visualizer:serviceaccount"],
         )
 
+def deploy_additional_kustomizations():
+    for name in settings.get("additional_kustomizations", []):
+        yaml = read_file("./.tiltbuild/yaml/{}.kustomization.yaml".format(name))
+        k8s_yaml(yaml)
+        objs = decode_yaml_stream(yaml)
+        print("objects")
+        print(find_all_objects_names(objs))
+        k8s_resource(
+            new_name = name,
+            objects = find_all_objects_names(objs),
+            labels = ["kustomization"],
+        )
+
 def prepare_all():
-    tools_arg = "--tools kustomize,envsubst,clusterctl "
+    tools_arg = "--tools kustomize,clusterctl "
     tilt_settings_file_arg = "--tilt-settings-file " + tilt_file
 
     cmd = "make -B tilt-prepare && ./hack/tools/bin/tilt-prepare {tools_arg}{tilt_settings_file_arg}".format(
@@ -498,7 +510,6 @@ def cluster_templates():
 
     template_dirs = settings.get("template_dirs", {
         "docker": ["./test/infrastructure/docker/templates"],
-        "in-memory": ["./test/infrastructure/inmemory/templates"],
     })
 
     for provider, provider_dirs in template_dirs.items():
@@ -521,18 +532,21 @@ def deploy_templates(filename, label, substitutions):
     basename = os.path.basename(filename)
     if basename.endswith(".yaml"):
         if basename.startswith("clusterclass-"):
-            template_name = basename.replace("clusterclass-", "").replace(".yaml", "")
-            deploy_clusterclass(template_name, label, filename, substitutions)
+            clusterclass_name = basename.replace("clusterclass-", "").replace(".yaml", "")
+            deploy_clusterclass(clusterclass_name, label, filename, substitutions)
         elif basename.startswith("cluster-template-"):
-            clusterclass_name = basename.replace("cluster-template-", "").replace(".yaml", "")
-            deploy_cluster_template(clusterclass_name, label, filename, substitutions)
+            template_name = basename.replace("cluster-template-", "").replace(".yaml", "")
+            deploy_cluster_template(template_name, label, filename, substitutions)
+        elif basename == "cluster-template.yaml":
+            template_name = "default"
+            deploy_cluster_template(template_name, label, filename, substitutions)
 
 def deploy_clusterclass(clusterclass_name, label, filename, substitutions):
-    apply_clusterclass_cmd = "cat " + filename + " | " + envsubst_cmd + " | " + kubectl_cmd + " apply --namespace=$NAMESPACE -f - && echo \"ClusterClass created from\'" + filename + "\', don't forget to delete\n\""
+    apply_clusterclass_cmd = clusterctl_cmd + " generate yaml --from " + filename + " | " + kubectl_cmd + " apply --namespace=$NAMESPACE -f - && echo \"ClusterClass created from\'" + filename + "\', don't forget to delete\n\""
     delete_clusterclass_cmd = kubectl_cmd + " --namespace=$NAMESPACE delete clusterclass " + clusterclass_name + ' --ignore-not-found=true; echo "\n"'
 
     local_resource(
-        name = clusterclass_name,
+        name = clusterclass_name + ".clusterclass",
         cmd = ["bash", "-c", apply_clusterclass_cmd],
         env = substitutions,
         auto_init = False,
@@ -541,9 +555,9 @@ def deploy_clusterclass(clusterclass_name, label, filename, substitutions):
     )
 
     cmd_button(
-        clusterclass_name + ":apply",
+        clusterclass_name + ".clusterclass:apply",
         argv = ["bash", "-c", apply_clusterclass_cmd],
-        env = dictonary_to_list_of_string(substitutions),
+        env = dictionary_to_list_of_string(substitutions),
         resource = clusterclass_name,
         icon_name = "note_add",
         text = "Apply `" + clusterclass_name + "` ClusterClass",
@@ -553,9 +567,9 @@ def deploy_clusterclass(clusterclass_name, label, filename, substitutions):
     )
 
     cmd_button(
-        clusterclass_name + ":delete",
+        clusterclass_name + ".clusterclass:delete",
         argv = ["bash", "-c", delete_clusterclass_cmd],
-        env = dictonary_to_list_of_string(substitutions),
+        env = dictionary_to_list_of_string(substitutions),
         resource = clusterclass_name,
         icon_name = "delete_forever",
         text = "Delete `" + clusterclass_name + "` ClusterClass",
@@ -580,7 +594,7 @@ def deploy_cluster_template(template_name, label, filename, substitutions):
     cmd_button(
         template_name + ":apply",
         argv = ["bash", "-c", apply_cluster_template_cmd],
-        env = dictonary_to_list_of_string(substitutions),
+        env = dictionary_to_list_of_string(substitutions),
         resource = template_name,
         icon_name = "add_box",
         text = "Create `" + template_name + "` cluster",
@@ -595,7 +609,7 @@ def deploy_cluster_template(template_name, label, filename, substitutions):
     cmd_button(
         template_name + ":delete",
         argv = ["bash", "-c", delete_clusters_cmd],
-        env = dictonary_to_list_of_string(substitutions),
+        env = dictionary_to_list_of_string(substitutions),
         resource = template_name,
         icon_name = "delete_forever",
         text = "Delete `" + template_name + "` clusters",
@@ -607,14 +621,14 @@ def deploy_cluster_template(template_name, label, filename, substitutions):
     cmd_button(
         template_name + ":delete-all",
         argv = ["bash", "-c", kubectl_cmd + " delete clusters --all --wait=false"],
-        env = dictonary_to_list_of_string(substitutions),
+        env = dictionary_to_list_of_string(substitutions),
         resource = template_name,
         icon_name = "delete_sweep",
         text = "Delete all workload clusters",
     )
 
-# A function to convert dictonary to list of strings in a format of "name=value"
-def dictonary_to_list_of_string(substitutions):
+# A function to convert dictionary to list of strings in a format of "name=value"
+def dictionary_to_list_of_string(substitutions):
     substitutions_list = []
     for name, value in substitutions.items():
         substitutions_list.append(name + "=" + value)
@@ -626,13 +640,15 @@ def dictonary_to_list_of_string(substitutions):
 
 include_user_tilt_files()
 
-load_provider_tiltfiles()
+load_provider_tilt_files()
 
 prepare_all()
 
 deploy_provider_crds()
 
 deploy_observability()
+
+deploy_additional_kustomizations()
 
 enable_providers()
 

@@ -19,7 +19,6 @@ package docker
 import (
 	"context"
 	"fmt"
-	"net"
 
 	"github.com/pkg/errors"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -27,7 +26,6 @@ import (
 
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
 	"sigs.k8s.io/cluster-api/test/infrastructure/container"
-	infrav1 "sigs.k8s.io/cluster-api/test/infrastructure/docker/api/v1beta1"
 	"sigs.k8s.io/cluster-api/test/infrastructure/docker/internal/docker/types"
 	"sigs.k8s.io/cluster-api/test/infrastructure/docker/internal/loadbalancer"
 )
@@ -38,16 +36,17 @@ type lbCreator interface {
 
 // LoadBalancer manages the load balancer for a specific docker cluster.
 type LoadBalancer struct {
-	name             string
-	image            string
-	container        *types.Node
-	ipFamily         clusterv1.ClusterIPFamily
-	lbCreator        lbCreator
-	controlPlanePort int
+	name                     string
+	image                    string
+	container                *types.Node
+	ipFamily                 clusterv1.ClusterIPFamily
+	lbCreator                lbCreator
+	backendControlPlanePort  string
+	frontendControlPlanePort string
 }
 
 // NewLoadBalancer returns a new helper for managing a docker loadbalancer with a given name.
-func NewLoadBalancer(ctx context.Context, cluster *clusterv1.Cluster, dockerCluster *infrav1.DockerCluster) (*LoadBalancer, error) {
+func NewLoadBalancer(ctx context.Context, cluster *clusterv1.Cluster, imageRepository, imageTag string, port string) (*LoadBalancer, error) {
 	if cluster.Name == "" {
 		return nil, errors.New("create load balancer: cluster name is empty")
 	}
@@ -64,41 +63,42 @@ func NewLoadBalancer(ctx context.Context, cluster *clusterv1.Cluster, dockerClus
 		return nil, err
 	}
 
+	// We tolerate this until removal;
+	// after removal IPFamily will become an internal CAPD concept.
+	// See https://github.com/kubernetes-sigs/cluster-api/issues/7521.
 	ipFamily, err := cluster.GetIPFamily()
 	if err != nil {
 		return nil, fmt.Errorf("create load balancer: %s", err)
 	}
 
-	image := getLoadBalancerImage(dockerCluster)
+	image := getLoadBalancerImage(imageRepository, imageTag)
 
+	frontendControlPlanePort := port
+	if frontendControlPlanePort == "0" {
+		frontendControlPlanePort = "6443"
+	}
 	return &LoadBalancer{
-		name:             cluster.Name,
-		image:            image,
-		container:        container,
-		ipFamily:         ipFamily,
-		lbCreator:        &Manager{},
-		controlPlanePort: dockerCluster.Spec.ControlPlaneEndpoint.Port,
+		name:                     cluster.Name,
+		image:                    image,
+		container:                container,
+		ipFamily:                 ipFamily,
+		lbCreator:                &Manager{},
+		frontendControlPlanePort: frontendControlPlanePort,
+		backendControlPlanePort:  "6443",
 	}, nil
 }
 
 // getLoadBalancerImage will return the image (e.g. "kindest/haproxy:2.1.1-alpine") to use for
 // the load balancer.
-func getLoadBalancerImage(dockerCluster *infrav1.DockerCluster) string {
-	// Check if a non-default image was provided
+func getLoadBalancerImage(imageRepository, imageTag string) string {
 	image := loadbalancer.Image
-	imageRepo := loadbalancer.DefaultImageRepository
-	imageTag := loadbalancer.DefaultImageTag
-
-	if dockerCluster != nil {
-		if dockerCluster.Spec.LoadBalancer.ImageRepository != "" {
-			imageRepo = dockerCluster.Spec.LoadBalancer.ImageRepository
-		}
-		if dockerCluster.Spec.LoadBalancer.ImageTag != "" {
-			imageTag = dockerCluster.Spec.LoadBalancer.ImageTag
-		}
+	if imageRepository == "" {
+		imageRepository = loadbalancer.DefaultImageRepository
 	}
-
-	return fmt.Sprintf("%s/%s:%s", imageRepo, image, imageTag)
+	if imageTag == "" {
+		imageTag = loadbalancer.DefaultImageTag
+	}
+	return fmt.Sprintf("%s/%s:%s", imageRepository, image, imageTag)
 }
 
 // ContainerName is the name of the docker container with the load balancer.
@@ -137,11 +137,18 @@ func (s *LoadBalancer) Create(ctx context.Context) error {
 }
 
 // UpdateConfiguration updates the external load balancer configuration with new control plane nodes.
-func (s *LoadBalancer) UpdateConfiguration(ctx context.Context) error {
+func (s *LoadBalancer) UpdateConfiguration(ctx context.Context, weights map[string]int, unsafeLoadBalancerConfig string) error {
 	log := ctrl.LoggerFrom(ctx)
 
 	if s.container == nil {
 		return errors.New("unable to configure load balancer: load balancer container does not exists")
+	}
+
+	configData := &loadbalancer.ConfigData{
+		FrontendControlPlanePort: s.frontendControlPlanePort,
+		BackendControlPlanePort:  s.backendControlPlanePort,
+		BackendServers:           map[string]loadbalancer.BackendServer{},
+		IPv6:                     s.ipFamily == clusterv1.IPv6IPFamily,
 	}
 
 	// collect info about the existing controlplane nodes
@@ -154,24 +161,31 @@ func (s *LoadBalancer) UpdateConfiguration(ctx context.Context) error {
 		return errors.WithStack(err)
 	}
 
-	var backendServers = map[string]string{}
 	for _, n := range controlPlaneNodes {
+		backendServer := loadbalancer.BackendServer{}
 		controlPlaneIPv4, controlPlaneIPv6, err := n.IP(ctx)
 		if err != nil {
 			return errors.Wrapf(err, "failed to get IP for container %s", n.String())
 		}
 		if s.ipFamily == clusterv1.IPv6IPFamily {
-			backendServers[n.String()] = net.JoinHostPort(controlPlaneIPv6, "6443")
+			backendServer.Address = controlPlaneIPv6
 		} else {
-			backendServers[n.String()] = net.JoinHostPort(controlPlaneIPv4, "6443")
+			backendServer.Address = controlPlaneIPv4
 		}
+
+		backendServer.Weight = 100
+		if w, ok := weights[n.String()]; ok {
+			backendServer.Weight = w
+		}
+		configData.BackendServers[n.String()] = backendServer
 	}
 
-	loadBalancerConfig, err := loadbalancer.Config(&loadbalancer.ConfigData{
-		ControlPlanePort: s.controlPlanePort,
-		BackendServers:   backendServers,
-		IPv6:             s.ipFamily == clusterv1.IPv6IPFamily,
-	})
+	loadBalancerConfigTemplate := loadbalancer.DefaultTemplate
+	if unsafeLoadBalancerConfig != "" {
+		loadBalancerConfigTemplate = unsafeLoadBalancerConfig
+	}
+
+	loadBalancerConfig, err := loadbalancer.Config(configData, loadBalancerConfigTemplate)
 	if err != nil {
 		return errors.WithStack(err)
 	}
@@ -179,6 +193,17 @@ func (s *LoadBalancer) UpdateConfiguration(ctx context.Context) error {
 	log.Info("Updating load balancer configuration")
 	if err := s.container.WriteFile(ctx, loadbalancer.ConfigPath, loadBalancerConfig); err != nil {
 		return errors.WithStack(err)
+	}
+
+	// Read back the load balancer configuration to ensure it got written before
+	// signaling haproxy to reload the config file.
+	// This is a workaround to fix https://github.com/kubernetes-sigs/cluster-api/issues/10356
+	readLoadBalancerConfig, err := s.container.ReadFile(ctx, loadbalancer.ConfigPath)
+	if err != nil {
+		return errors.WithStack(err)
+	}
+	if string(readLoadBalancerConfig) != loadBalancerConfig {
+		return fmt.Errorf("read load balancer configuration does not match written file")
 	}
 
 	return errors.WithStack(s.container.Kill(ctx, "SIGHUP"))

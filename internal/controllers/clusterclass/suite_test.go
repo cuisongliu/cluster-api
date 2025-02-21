@@ -27,17 +27,21 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/selection"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/component-base/featuregate"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
 	"sigs.k8s.io/cluster-api/api/v1beta1/index"
 	"sigs.k8s.io/cluster-api/feature"
+	fakeruntimeclient "sigs.k8s.io/cluster-api/internal/runtime/client/fake"
 	"sigs.k8s.io/cluster-api/internal/test/envtest"
 )
 
@@ -62,40 +66,49 @@ func TestMain(m *testing.M) {
 		}
 	}
 	setupReconcilers := func(ctx context.Context, mgr ctrl.Manager) {
-		unstructuredCachingClient, err := client.New(mgr.GetConfig(), client.Options{
-			Cache: &client.CacheOptions{
-				Reader:       mgr.GetCache(),
-				Unstructured: true,
-			},
-		})
-		if err != nil {
-			panic(fmt.Sprintf("unable to create unstructuredCachineClient: %v", err))
-		}
 		if err := (&Reconciler{
-			Client:                    mgr.GetClient(),
-			APIReader:                 mgr.GetAPIReader(),
-			UnstructuredCachingClient: unstructuredCachingClient,
+			Client:        mgr.GetClient(),
+			RuntimeClient: fakeruntimeclient.NewRuntimeClientBuilder().Build(),
 		}).SetupWithManager(ctx, mgr, controller.Options{MaxConcurrentReconciles: 5}); err != nil {
 			panic(fmt.Sprintf("unable to create clusterclass reconciler: %v", err))
 		}
 	}
 	SetDefaultEventuallyPollingInterval(100 * time.Millisecond)
 	SetDefaultEventuallyTimeout(30 * time.Second)
+
+	req, _ := labels.NewRequirement(clusterv1.ClusterNameLabel, selection.Exists, nil)
+	clusterSecretCacheSelector := labels.NewSelector().Add(*req)
+
 	os.Exit(envtest.Run(ctx, envtest.RunInput{
-		M:                   m,
-		ManagerUncachedObjs: []client.Object{},
-		SetupEnv:            func(e *envtest.Environment) { env = e },
-		SetupIndexes:        setupIndexes,
-		SetupReconcilers:    setupReconcilers,
+		M: m,
+		ManagerCacheOptions: cache.Options{
+			ByObject: map[client.Object]cache.ByObject{
+				// Only cache Secrets with the cluster name label.
+				// This is similar to the real world.
+				&corev1.Secret{}: {
+					Label: clusterSecretCacheSelector,
+				},
+			},
+		},
+		ManagerUncachedObjs: []client.Object{
+			&corev1.ConfigMap{},
+			&corev1.Secret{},
+		},
+		SetupEnv:         func(e *envtest.Environment) { env = e },
+		SetupIndexes:     setupIndexes,
+		SetupReconcilers: setupReconcilers,
 	}))
 }
 
-func ownerReferenceTo(obj client.Object) *metav1.OwnerReference {
+// ownerReferenceTo converts an object to an OwnerReference.
+// Note: We pass in gvk explicitly as we can't rely on GVK being set on all objects
+// (only on Unstructured).
+func ownerReferenceTo(obj client.Object, gvk schema.GroupVersionKind) *metav1.OwnerReference {
 	return &metav1.OwnerReference{
-		Kind:       obj.GetObjectKind().GroupVersionKind().Kind,
+		APIVersion: gvk.GroupVersion().String(),
+		Kind:       gvk.Kind,
 		Name:       obj.GetName(),
 		UID:        obj.GetUID(),
-		APIVersion: obj.GetObjectKind().GroupVersionKind().GroupVersion().String(),
 	}
 }
 

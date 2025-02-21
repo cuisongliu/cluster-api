@@ -18,8 +18,9 @@ spec:
       containers:
       - args:
         - "--leader-elect"
-        - "--metrics-bind-addr=localhost:8080"
-        - "--feature-gates=MachinePool=${EXP_MACHINE_POOL:=false},ClusterTopology=${CLUSTER_TOPOLOGY:=false}"
+        - "--diagnostics-address=${CAPI_DIAGNOSTICS_ADDRESS:=:8443}"
+        - "--insecure-diagnostics=${CAPI_INSECURE_DIAGNOSTICS:=false}"
+        - "--feature-gates=MachinePool=${EXP_MACHINE_POOL:=true},ClusterTopology=${CLUSTER_TOPOLOGY:=false},PriorityQueue=${EXP_PRIORITY_QUEUE:=false}"
         image: controller:latest
         name: manager
         env:
@@ -35,11 +36,18 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: metadata.uid
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
         - name: DOCKER_HOST
           value: ${CAPD_DOCKER_HOST:=""}
         ports:
         - containerPort: 9440
           name: healthz
+          protocol: TCP
+        - containerPort: 8443
+          name: metrics
           protocol: TCP
         readinessProbe:
           httpGet:
@@ -54,6 +62,7 @@ spec:
             name: dockersock
         securityContext:
           privileged: true
+        terminationMessagePolicy: FallbackToLogsOnError
       terminationGracePeriodSeconds: 10
       serviceAccountName: manager
       tolerations:

@@ -24,7 +24,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilfeature "k8s.io/component-base/featuregate/testing"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	runtimev1 "sigs.k8s.io/cluster-api/exp/runtime/api/v1alpha1"
@@ -48,13 +48,13 @@ func TestExtensionConfigValidationFeatureGated(t *testing.T) {
 		},
 		Spec: runtimev1.ExtensionConfigSpec{
 			ClientConfig: runtimev1.ClientConfig{
-				URL: pointer.String("https://extension-address.com"),
+				URL: ptr.To("https://extension-address.com"),
 			},
 			NamespaceSelector: &metav1.LabelSelector{},
 		},
 	}
 	updatedExtension := extension.DeepCopy()
-	updatedExtension.Spec.ClientConfig.URL = pointer.String("https://a-new-extension-address.com")
+	updatedExtension.Spec.ClientConfig.URL = ptr.To("https://a-new-extension-address.com")
 	tests := []struct {
 		name        string
 		new         *runtimev1.ExtensionConfig
@@ -92,7 +92,7 @@ func TestExtensionConfigValidationFeatureGated(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			defer utilfeature.SetFeatureGateDuringTest(t, feature.Gates, feature.RuntimeSDK, tt.featureGate)()
+			utilfeature.SetFeatureGateDuringTest(t, feature.Gates, feature.RuntimeSDK, tt.featureGate)
 			webhook := ExtensionConfig{}
 			g := NewWithT(t)
 			warnings, err := webhook.validate(context.TODO(), tt.old, tt.new)
@@ -109,7 +109,7 @@ func TestExtensionConfigValidationFeatureGated(t *testing.T) {
 
 func TestExtensionConfigDefault(t *testing.T) {
 	g := NewWithT(t)
-	defer utilfeature.SetFeatureGateDuringTest(t, feature.Gates, feature.RuntimeSDK, true)()
+	utilfeature.SetFeatureGateDuringTest(t, feature.Gates, feature.RuntimeSDK, true)
 
 	extensionConfig := &runtimev1.ExtensionConfig{
 		ObjectMeta: metav1.ObjectMeta{
@@ -129,8 +129,8 @@ func TestExtensionConfigDefault(t *testing.T) {
 	t.Run("for Extension", util.CustomDefaultValidateTest(ctx, extensionConfig, extensionConfigWebhook))
 
 	g.Expect(extensionConfigWebhook.Default(ctx, extensionConfig)).To(Succeed())
-	g.Expect(extensionConfig.Spec.NamespaceSelector).To(Equal(&metav1.LabelSelector{}))
-	g.Expect(extensionConfig.Spec.ClientConfig.Service.Port).To(Equal(pointer.Int32(443)))
+	g.Expect(extensionConfig.Spec.NamespaceSelector).To(BeComparableTo(&metav1.LabelSelector{}))
+	g.Expect(extensionConfig.Spec.ClientConfig.Service.Port).To(BeComparableTo(ptr.To[int32](443)))
 }
 
 func TestExtensionConfigValidate(t *testing.T) {
@@ -140,7 +140,7 @@ func TestExtensionConfigValidate(t *testing.T) {
 		},
 		Spec: runtimev1.ExtensionConfigSpec{
 			ClientConfig: runtimev1.ClientConfig{
-				URL: pointer.String("https://extension-address.com"),
+				URL: ptr.To("https://extension-address.com"),
 			},
 		},
 	}
@@ -152,8 +152,8 @@ func TestExtensionConfigValidate(t *testing.T) {
 		Spec: runtimev1.ExtensionConfigSpec{
 			ClientConfig: runtimev1.ClientConfig{
 				Service: &runtimev1.ServiceReference{
-					Path:      pointer.String("/path/to/handler"),
-					Port:      pointer.Int32(1),
+					Path:      ptr.To("/path/to/handler"),
+					Port:      ptr.To[int32](1),
 					Name:      "foo",
 					Namespace: "bar",
 				}},
@@ -168,13 +168,13 @@ func TestExtensionConfigValidate(t *testing.T) {
 
 	// Valid updated Extension
 	updatedExtension := extensionWithURL.DeepCopy()
-	updatedExtension.Spec.ClientConfig.URL = pointer.String("https://a-in-extension-address.com")
+	updatedExtension.Spec.ClientConfig.URL = ptr.To("https://a-in-extension-address.com")
 
 	extensionWithoutURLOrService := extensionWithURL.DeepCopy()
 	extensionWithoutURLOrService.Spec.ClientConfig.URL = nil
 
 	extensionWithInvalidServicePath := extensionWithService.DeepCopy()
-	extensionWithInvalidServicePath.Spec.ClientConfig.Service.Path = pointer.String("https://example.com")
+	extensionWithInvalidServicePath.Spec.ClientConfig.Service.Path = ptr.To("https://example.com")
 
 	extensionWithNoServiceName := extensionWithService.DeepCopy()
 	extensionWithNoServiceName.Spec.ClientConfig.Service.Name = ""
@@ -189,13 +189,13 @@ func TestExtensionConfigValidate(t *testing.T) {
 	extensionWithBadServiceNamespace.Spec.ClientConfig.Service.Namespace = "INVALID"
 
 	badURLExtension := extensionWithURL.DeepCopy()
-	badURLExtension.Spec.ClientConfig.URL = pointer.String("https//extension-address.com")
+	badURLExtension.Spec.ClientConfig.URL = ptr.To("https//extension-address.com")
 
 	badSchemeExtension := extensionWithURL.DeepCopy()
-	badSchemeExtension.Spec.ClientConfig.URL = pointer.String("unknown://extension-address.com")
+	badSchemeExtension.Spec.ClientConfig.URL = ptr.To("unknown://extension-address.com")
 
 	extensionWithInvalidServicePort := extensionWithService.DeepCopy()
-	extensionWithInvalidServicePort.Spec.ClientConfig.Service.Port = pointer.Int32(90000)
+	extensionWithInvalidServicePort.Spec.ClientConfig.Service.Port = ptr.To[int32](90000)
 
 	extensionWithInvalidNamespaceSelector := extensionWithService.DeepCopy()
 	extensionWithInvalidNamespaceSelector.Spec.NamespaceSelector = &metav1.LabelSelector{
@@ -333,7 +333,7 @@ func TestExtensionConfigValidate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			defer utilfeature.SetFeatureGateDuringTest(t, feature.Gates, feature.RuntimeSDK, tt.featureGate)()
+			utilfeature.SetFeatureGateDuringTest(t, feature.Gates, feature.RuntimeSDK, tt.featureGate)
 			g := NewWithT(t)
 			webhook := &ExtensionConfig{}
 			// Default the objects so we're not handling defaulted cases.

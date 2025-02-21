@@ -28,6 +28,7 @@ import (
 	"github.com/pkg/errors"
 
 	"sigs.k8s.io/cluster-api/cmd/clusterctl/client/config"
+	logf "sigs.k8s.io/cluster-api/cmd/clusterctl/log"
 )
 
 const (
@@ -73,6 +74,13 @@ func (o *overrides) Path() (string, error) {
 		return "", err
 	}
 	basepath := filepath.Join(configDirectory, overrideFolder)
+	// Fallback to the .cluster-api directory in home if the above does not exist.
+	if _, err := os.Stat(basepath); os.IsNotExist(err) {
+		fallbackBasepath := filepath.Join(xdg.Home, config.ConfigFolder, overrideFolder)
+		if _, err := os.Stat(fallbackBasepath); err == nil {
+			basepath = fallbackBasepath
+		}
+	}
 	f, err := o.configVariablesClient.Get(overrideFolderKey)
 	if err == nil && strings.TrimSpace(f) != "" {
 		basepath = f
@@ -107,7 +115,11 @@ func (o *overrides) Path() (string, error) {
 // getLocalOverride return local override file from the config folder, if it exists.
 // This is required for development purposes, but it can be used also in production as a workaround for problems on the official repositories.
 func getLocalOverride(info *newOverrideInput) ([]byte, error) {
+	log := logf.Log
+
 	overridePath, err := newOverride(info).Path()
+	log.V(5).Info("Potential override file", "searchFile", overridePath, "provider", info.provider.ManifestLabel(), "version", info.version)
+
 	if err != nil {
 		return nil, err
 	}

@@ -29,10 +29,6 @@ import (
 	logf "sigs.k8s.io/cluster-api/cmd/clusterctl/log"
 )
 
-var (
-	ctx = context.TODO()
-)
-
 // Kubeconfig is a type that specifies inputs related to the actual
 // kubeconfig.
 type Kubeconfig struct {
@@ -102,7 +98,7 @@ type clusterClient struct {
 }
 
 // RepositoryClientFactory defines a function that returns a new repository.Client.
-type RepositoryClientFactory func(provider config.Provider, configClient config.Client, options ...repository.Option) (repository.Client, error)
+type RepositoryClientFactory func(ctx context.Context, provider config.Provider, configClient config.Client, options ...repository.Option) (repository.Client, error)
 
 // ensure clusterClient implements Client.
 var _ Client = &clusterClient{}
@@ -204,7 +200,7 @@ func newClusterClient(kubeconfig Kubeconfig, configClient config.Client, options
 
 	// if there is an injected proxy, use it, otherwise use a default one
 	if client.proxy == nil {
-		client.proxy = newProxy(client.kubeconfig)
+		client.proxy = NewProxy(client.kubeconfig)
 	}
 
 	// if there is an injected repositoryClientFactory, use it, otherwise use the default one
@@ -223,15 +219,15 @@ func newClusterClient(kubeconfig Kubeconfig, configClient config.Client, options
 }
 
 // retryWithExponentialBackoff repeats an operation until it passes or the exponential backoff times out.
-func retryWithExponentialBackoff(opts wait.Backoff, operation func() error) error {
+func retryWithExponentialBackoff(ctx context.Context, opts wait.Backoff, operation func(ctx context.Context) error) error {
 	log := logf.Log
 
 	i := 0
-	err := wait.ExponentialBackoff(opts, func() (bool, error) {
+	err := wait.ExponentialBackoffWithContext(ctx, opts, func(ctx context.Context) (bool, error) {
 		i++
-		if err := operation(); err != nil {
+		if err := operation(ctx); err != nil {
 			if i < opts.Steps {
-				log.V(5).Info("Retrying with backoff", "Cause", err.Error())
+				log.V(5).Info("Retrying with backoff", "cause", err.Error())
 				return false, nil
 			}
 			return false, err

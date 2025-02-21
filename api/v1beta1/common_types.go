@@ -18,7 +18,10 @@ package v1beta1
 
 import (
 	corev1 "k8s.io/api/core/v1"
+	apivalidation "k8s.io/apimachinery/pkg/api/validation"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	metav1validation "k8s.io/apimachinery/pkg/apis/meta/v1/validation"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
 const (
@@ -64,6 +67,10 @@ const (
 	// ClusterTopologyUnsafeUpdateClassNameAnnotation can be used to disable the webhook check on
 	// update that disallows a pre-existing Cluster to be populated with Topology information and Class.
 	ClusterTopologyUnsafeUpdateClassNameAnnotation = "unsafe.topology.cluster.x-k8s.io/disable-update-class-name-check"
+
+	// ClusterTopologyUnsafeUpdateVersionAnnotation can be used to disable the webhook checks on
+	// update that disallows updating the .topology.spec.version on certain conditions.
+	ClusterTopologyUnsafeUpdateVersionAnnotation = "unsafe.topology.cluster.x-k8s.io/disable-update-version-check"
 
 	// ProviderNameLabel is the label set on components in the provider manifest.
 	// This label allows to easily identify all the components belonging to a provider; the clusterctl
@@ -121,6 +128,9 @@ const (
 	// MachineSkipRemediationAnnotation is the annotation used to mark the machines that should not be considered for remediation by MachineHealthCheck reconciler.
 	MachineSkipRemediationAnnotation = "cluster.x-k8s.io/skip-remediation"
 
+	// RemediateMachineAnnotation request the MachineHealthCheck reconciler to mark a Machine as unhealthy. CAPI builtin remediation will prioritize Machines with the annotation to be remediated.
+	RemediateMachineAnnotation = "cluster.x-k8s.io/remediate-machine"
+
 	// MachineSetSkipPreflightChecksAnnotation is the annotation used to provide a comma-separated list of
 	// preflight checks that should be skipped during the MachineSet reconciliation.
 	// Supported items are:
@@ -153,7 +163,7 @@ const (
 	// only during a server side dry run apply operation. It is used for validating
 	// update webhooks for objects which get updated by template rotation (e.g. InfrastructureMachineTemplate).
 	// When the annotation is set and the admission request is a dry run, the webhook should
-	// deny validation due to immutability. By that the request will succeed (without
+	// skip validation due to immutability. By that the request will succeed (without
 	// any changes to the actual object because it is a dry run) and the topology controller
 	// will receive the resulting object.
 	TopologyDryRunAnnotation = "topology.cluster.x-k8s.io/dry-run"
@@ -221,6 +231,14 @@ const (
 	MachineSetPreflightCheckControlPlaneIsStable MachineSetPreflightCheck = "ControlPlaneIsStable"
 )
 
+// NodeOutdatedRevisionTaint can be added to Nodes at rolling updates in general triggered by updating MachineDeployment
+// This taint is used to prevent unnecessary pod churn, i.e., as the first node is drained, pods previously running on
+// that node are scheduled onto nodes who have yet to be replaced, but will be torn down soon.
+var NodeOutdatedRevisionTaint = corev1.Taint{
+	Key:    "node.cluster.x-k8s.io/outdated-revision",
+	Effect: corev1.TaintEffectPreferNoSchedule,
+}
+
 // NodeUninitializedTaint can be added to Nodes at creation by the bootstrap provider, e.g. the
 // KubeadmBootstrap provider will add the taint.
 // This taint is used to prevent workloads to be scheduled on Nodes before the node is initialized by Cluster API.
@@ -255,10 +273,10 @@ const (
 
 // MachineAddress contains information for the node's address.
 type MachineAddress struct {
-	// Machine address type, one of Hostname, ExternalIP, InternalIP, ExternalDNS or InternalDNS.
+	// type is the machine address type, one of Hostname, ExternalIP, InternalIP, ExternalDNS or InternalDNS.
 	Type MachineAddressType `json:"type"`
 
-	// The machine address.
+	// address is the machine address.
 	Address string `json:"address"`
 }
 
@@ -287,17 +305,30 @@ type MachineAddresses []MachineAddress
 // In future versions, controller-tools@v2 might allow overriding the type and validation for embedded
 // types. When that happens, this hack should be revisited.
 type ObjectMeta struct {
-	// Map of string keys and values that can be used to organize and categorize
+	// labels is a map of string keys and values that can be used to organize and categorize
 	// (scope and select) objects. May match selectors of replication controllers
 	// and services.
 	// More info: http://kubernetes.io/docs/user-guide/labels
 	// +optional
 	Labels map[string]string `json:"labels,omitempty"`
 
-	// Annotations is an unstructured key value map stored with a resource that may be
+	// annotations is an unstructured key value map stored with a resource that may be
 	// set by external tools to store and retrieve arbitrary metadata. They are not
 	// queryable and should be preserved when modifying objects.
 	// More info: http://kubernetes.io/docs/user-guide/annotations
 	// +optional
 	Annotations map[string]string `json:"annotations,omitempty"`
+}
+
+// Validate validates the labels and annotations in ObjectMeta.
+func (metadata *ObjectMeta) Validate(parent *field.Path) field.ErrorList {
+	allErrs := metav1validation.ValidateLabels(
+		metadata.Labels,
+		parent.Child("labels"),
+	)
+	allErrs = append(allErrs, apivalidation.ValidateAnnotations(
+		metadata.Annotations,
+		parent.Child("annotations"),
+	)...)
+	return allErrs
 }

@@ -17,11 +17,14 @@ limitations under the License.
 package cmd
 
 import (
+	"context"
+
 	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
 
 	clusterctlv1 "sigs.k8s.io/cluster-api/cmd/clusterctl/api/v1alpha3"
 	"sigs.k8s.io/cluster-api/cmd/clusterctl/client"
+	"sigs.k8s.io/cluster-api/cmd/clusterctl/cmd/internal/templates"
 )
 
 type generateProvidersOptions struct {
@@ -44,7 +47,7 @@ var generateProviderCmd = &cobra.Command{
 	Use:   "provider",
 	Args:  cobra.NoArgs,
 	Short: "Generate templates for provider components",
-	Long: LongDesc(`
+	Long: templates.LongDesc(`
 		Generate templates for provider components.
 
 		clusterctl fetches the provider components from the provider repository and performs variable substitution.
@@ -52,7 +55,7 @@ var generateProviderCmd = &cobra.Command{
 		Variable values are either sourced from the clusterctl config file or
 		from environment variables`),
 
-	Example: Examples(`
+	Example: templates.Examples(`
 		# Generates a yaml file for creating provider with variable values using
         # components defined in the provider repository.
 		clusterctl generate provider --infrastructure aws
@@ -72,7 +75,7 @@ var generateProviderCmd = &cobra.Command{
 		# No variables will be processed and substituted using this flag
 		clusterctl generate provider --infrastructure aws:v0.4.1 --raw`),
 
-	RunE: func(cmd *cobra.Command, args []string) error {
+	RunE: func(*cobra.Command, []string) error {
 		return runGenerateProviderComponents()
 	},
 }
@@ -105,11 +108,13 @@ func init() {
 }
 
 func runGenerateProviderComponents() error {
+	ctx := context.Background()
+
 	providerName, providerType, err := parseProvider()
 	if err != nil {
 		return err
 	}
-	c, err := client.New(cfgFile)
+	c, err := client.New(ctx, cfgFile)
 	if err != nil {
 		return err
 	}
@@ -119,7 +124,7 @@ func runGenerateProviderComponents() error {
 		SkipTemplateProcess: gpo.raw || gpo.textOutput,
 	}
 
-	components, err := c.GenerateProvider(providerName, providerType, options)
+	components, err := c.GenerateProvider(ctx, providerName, providerType, options)
 	if err != nil {
 		return err
 	}

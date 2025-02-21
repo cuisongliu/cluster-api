@@ -1,5 +1,13 @@
 # clusterctl alpha topology plan
 
+<aside class="note warning">
+
+<h1>Warning</h1>
+
+"clusterctl alpha topology plan" is deprecated and will be removed in one of the upcoming releases. For more details, please see [#10138](https://github.com/kubernetes-sigs/cluster-api/issues/10138). 
+
+</aside>
+
 The `clusterctl alpha topology plan` command can be used to get a plan of how a Cluster topology evolves given
 file(s) containing resources to be applied to a Cluster.
 
@@ -31,7 +39,7 @@ to support use cases where other controllers are co-authoring the same objects, 
 in a dry-run scenario.
 
 As a consequence Dry-Run can give some false positives/false negatives when trying to have a preview of
-changes to a set of existing topology owned objects. In other worlds this limitation impacts all the use cases described
+changes to a set of existing topology owned objects. In other words this limitation impacts all the use cases described
 below except for "Designing a new ClusterClass".
 
 More specifically:
@@ -127,8 +135,6 @@ spec:
         nodeDrainTimeout: 1s
       kubeadmConfigSpec:
         clusterConfiguration:
-          controllerManager:
-            extraArgs: { enable-hostpath-provisioner: 'true' }
           apiServer:
             certSANs: [ localhost, 127.0.0.1 ]
         initConfiguration:

@@ -21,8 +21,9 @@ spec:
             - /manager
           args:
             - "--leader-elect"
-            - "--metrics-bind-addr=localhost:8080"
-            - "--feature-gates=MachinePool=${EXP_MACHINE_POOL:=false},ClusterResourceSet=${EXP_CLUSTER_RESOURCE_SET:=false},ClusterTopology=${CLUSTER_TOPOLOGY:=false},RuntimeSDK=${EXP_RUNTIME_SDK:=false},MachineSetPreflightChecks=${EXP_MACHINE_SET_PREFLIGHT_CHECKS:=false}"
+            - "--diagnostics-address=${CAPI_DIAGNOSTICS_ADDRESS:=:8443}"
+            - "--insecure-diagnostics=${CAPI_INSECURE_DIAGNOSTICS:=false}"
+            - "--feature-gates=MachinePool=${EXP_MACHINE_POOL:=true},ClusterResourceSet=${EXP_CLUSTER_RESOURCE_SET:=true},ClusterTopology=${CLUSTER_TOPOLOGY:=false},RuntimeSDK=${EXP_RUNTIME_SDK:=false},MachineSetPreflightChecks=${EXP_MACHINE_SET_PREFLIGHT_CHECKS:=true},MachineWaitForVolumeDetachConsiderVolumeAttachments=${EXP_MACHINE_WAITFORVOLUMEDETACH_CONSIDER_VOLUMEATTACHMENTS:=true},PriorityQueue=${EXP_PRIORITY_QUEUE:=false}"
           image: controller:latest
           name: manager
           env:
@@ -42,6 +43,9 @@ spec:
             - containerPort: 9440
               name: healthz
               protocol: TCP
+            - containerPort: 8443
+              name: metrics
+              protocol: TCP
           readinessProbe:
             httpGet:
               path: /readyz
@@ -58,6 +62,7 @@ spec:
             privileged: false
             runAsUser: 65532
             runAsGroup: 65532
+          terminationMessagePolicy: FallbackToLogsOnError
       terminationGracePeriodSeconds: 10
       serviceAccountName: manager
       tolerations:

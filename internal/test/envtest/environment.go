@@ -41,36 +41,66 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
+	"k8s.io/component-base/logs"
+	logsv1 "k8s.io/component-base/logs/api/v1"
 	"k8s.io/klog/v2"
-	"k8s.io/klog/v2/klogr"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/config"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
+	"sigs.k8s.io/controller-runtime/pkg/metrics"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
 	bootstrapv1 "sigs.k8s.io/cluster-api/bootstrap/kubeadm/api/v1beta1"
+	bootstrapwebhooks "sigs.k8s.io/cluster-api/bootstrap/kubeadm/webhooks"
 	"sigs.k8s.io/cluster-api/cmd/clusterctl/log"
 	controlplanev1 "sigs.k8s.io/cluster-api/controlplane/kubeadm/api/v1beta1"
+	controlplanewebhooks "sigs.k8s.io/cluster-api/controlplane/kubeadm/webhooks"
 	addonsv1 "sigs.k8s.io/cluster-api/exp/addons/api/v1beta1"
+	addonswebhooks "sigs.k8s.io/cluster-api/exp/addons/webhooks"
 	expv1 "sigs.k8s.io/cluster-api/exp/api/v1beta1"
-	ipamv1 "sigs.k8s.io/cluster-api/exp/ipam/api/v1alpha1"
+	ipamv1 "sigs.k8s.io/cluster-api/exp/ipam/api/v1beta1"
 	expipamwebhooks "sigs.k8s.io/cluster-api/exp/ipam/webhooks"
 	runtimev1 "sigs.k8s.io/cluster-api/exp/runtime/api/v1alpha1"
-	"sigs.k8s.io/cluster-api/internal/test/builder"
+	expapiwebhooks "sigs.k8s.io/cluster-api/exp/webhooks"
+	"sigs.k8s.io/cluster-api/feature"
+	internalwebhooks "sigs.k8s.io/cluster-api/internal/webhooks"
 	runtimewebhooks "sigs.k8s.io/cluster-api/internal/webhooks/runtime"
 	"sigs.k8s.io/cluster-api/util/kubeconfig"
+	"sigs.k8s.io/cluster-api/util/test/builder"
 	"sigs.k8s.io/cluster-api/version"
 	"sigs.k8s.io/cluster-api/webhooks"
 )
 
 func init() {
-	klog.InitFlags(nil)
-	logger := klogr.New()
+	// This has to be done so klog.Background() uses a proper logger.
+	// Otherwise it would fall back and log to os.Stderr.
+	// This would lead to race conditions because input.M.Run() writes os.Stderr
+	// while some go routines in controller-runtime use os.Stderr to write logs.
+	logOptions := logs.NewOptions()
+	logOptions.Verbosity = logsv1.VerbosityLevel(2)
+	if logLevel := os.Getenv("CAPI_TEST_ENV_LOG_LEVEL"); logLevel != "" {
+		logLevelInt, err := strconv.Atoi(logLevel)
+		if err != nil {
+			klog.ErrorS(err, "Unable to convert value of CAPI_TEST_ENV_LOG_LEVEL environment variable to integer")
+			os.Exit(1)
+		}
+		logOptions.Verbosity = logsv1.VerbosityLevel(logLevelInt)
+	}
+	if err := logsv1.ValidateAndApply(logOptions, nil); err != nil {
+		klog.ErrorS(err, "Unable to validate and apply log options")
+		os.Exit(1)
+	}
+
+	logger := klog.Background()
 	// Use klog as the internal logger for this envtest environment.
 	log.SetLogger(logger)
-	// Additionally force all of the controllers to use the Ginkgo logger.
+	// Additionally force all controllers to use the Ginkgo logger.
 	ctrl.SetLogger(logger)
 	// Add logger for ginkgo.
 	klog.SetOutput(ginkgo.GinkgoWriter)
@@ -86,12 +116,14 @@ func init() {
 	utilruntime.Must(admissionv1.AddToScheme(scheme.Scheme))
 	utilruntime.Must(runtimev1.AddToScheme(scheme.Scheme))
 	utilruntime.Must(ipamv1.AddToScheme(scheme.Scheme))
+	utilruntime.Must(builder.AddTransitionV1Beta2ToScheme(scheme.Scheme))
 }
 
 // RunInput is the input for Run.
 type RunInput struct {
 	M                   *testing.M
 	ManagerUncachedObjs []client.Object
+	ManagerCacheOptions cache.Options
 	SetupIndexes        func(ctx context.Context, mgr ctrl.Manager)
 	SetupReconcilers    func(ctx context.Context, mgr ctrl.Manager)
 	SetupEnv            func(e *Environment)
@@ -117,7 +149,10 @@ func Run(ctx context.Context, input RunInput) int {
 	}
 
 	// Bootstrapping test environment
-	env := newEnvironment(input.ManagerUncachedObjs...)
+	env := newEnvironment(input.ManagerCacheOptions, input.ManagerUncachedObjs...)
+
+	ctx, cancel := context.WithCancelCause(ctx)
+	env.cancelManager = cancel
 
 	if input.SetupIndexes != nil {
 		input.SetupIndexes(ctx, env.Manager)
@@ -134,18 +169,18 @@ func Run(ctx context.Context, input RunInput) int {
 		config := kubeconfig.FromEnvTestConfig(env.Config, &clusterv1.Cluster{
 			ObjectMeta: metav1.ObjectMeta{Name: "test"},
 		})
-		if err := os.WriteFile(kubeconfigPath, config, 0600); err != nil {
+		if err := os.WriteFile(kubeconfigPath, config, 0o600); err != nil {
 			panic(errors.Wrapf(err, "failed to write the test env kubeconfig"))
 		}
 	}
 
 	if input.MinK8sVersion != "" {
 		if err := version.CheckKubernetesVersion(env.Config, input.MinK8sVersion); err != nil {
-			fmt.Printf("[IMPORTANT] skipping tests after failing version check: %v\n", err)
+			fmt.Printf("[ERROR] Cannot run tests after failing version check: %v\n", err)
 			if err := env.stop(); err != nil {
 				fmt.Println("[WARNING] Failed to stop the test environment")
 			}
-			return 0
+			return 1
 		}
 	}
 
@@ -160,21 +195,30 @@ func Run(ctx context.Context, input RunInput) int {
 		return code
 	}
 
+	var errs []error
+
+	if err := verifyPanicMetrics(); err != nil {
+		errs = append(errs, errors.Wrapf(err, "panics occurred during tests"))
+	}
+
 	// Tearing down the test environment
 	if err := env.stop(); err != nil {
-		panic(fmt.Sprintf("Failed to stop the test environment: %v", err))
+		errs = append(errs, errors.Wrapf(err, "failed to stop the test environment"))
 	}
+
+	if len(errs) > 0 {
+		panic(kerrors.NewAggregate(errs))
+	}
+
 	return code
 }
 
-var (
-	cacheSyncBackoff = wait.Backoff{
-		Duration: 100 * time.Millisecond,
-		Factor:   1.5,
-		Steps:    8,
-		Jitter:   0.4,
-	}
-)
+var cacheSyncBackoff = wait.Backoff{
+	Duration: 100 * time.Millisecond,
+	Factor:   1.5,
+	Steps:    8,
+	Jitter:   0.4,
+}
 
 // Environment encapsulates a Kubernetes local test environment.
 type Environment struct {
@@ -183,14 +227,14 @@ type Environment struct {
 	Config *rest.Config
 
 	env           *envtest.Environment
-	cancelManager context.CancelFunc
+	cancelManager context.CancelCauseFunc
 }
 
 // newEnvironment creates a new environment spinning up a local api-server.
 //
 // This function should be called only once for each package you're running tests within,
 // usually the environment is initialized in a suite_test.go file within a `BeforeSuite` ginkgo block.
-func newEnvironment(uncachedObjs ...client.Object) *Environment {
+func newEnvironment(managerCacheOptions cache.Options, uncachedObjs ...client.Object) *Environment {
 	// Get the root of the current file to use in CRD paths.
 	_, filename, _, _ := goruntime.Caller(0) //nolint:dogsled
 	root := path.Join(path.Dir(filename), "..", "..", "..")
@@ -202,6 +246,7 @@ func newEnvironment(uncachedObjs ...client.Object) *Environment {
 			filepath.Join(root, "config", "crd", "bases"),
 			filepath.Join(root, "controlplane", "kubeadm", "config", "crd", "bases"),
 			filepath.Join(root, "bootstrap", "kubeadm", "config", "crd", "bases"),
+			filepath.Join(root, "util", "test", "builder", "crd"),
 		},
 		CRDs: []*apiextensionsv1.CustomResourceDefinition{
 			builder.GenericBootstrapConfigCRD.DeepCopy(),
@@ -210,6 +255,8 @@ func newEnvironment(uncachedObjs ...client.Object) *Environment {
 			builder.GenericControlPlaneTemplateCRD.DeepCopy(),
 			builder.GenericInfrastructureMachineCRD.DeepCopy(),
 			builder.GenericInfrastructureMachineTemplateCRD.DeepCopy(),
+			builder.GenericInfrastructureMachinePoolCRD.DeepCopy(),
+			builder.GenericInfrastructureMachinePoolTemplateCRD.DeepCopy(),
 			builder.GenericInfrastructureClusterCRD.DeepCopy(),
 			builder.GenericInfrastructureClusterTemplateCRD.DeepCopy(),
 			builder.GenericRemediationCRD.DeepCopy(),
@@ -217,6 +264,8 @@ func newEnvironment(uncachedObjs ...client.Object) *Environment {
 			builder.TestInfrastructureClusterTemplateCRD.DeepCopy(),
 			builder.TestInfrastructureClusterCRD.DeepCopy(),
 			builder.TestInfrastructureMachineTemplateCRD.DeepCopy(),
+			builder.TestInfrastructureMachinePoolCRD.DeepCopy(),
+			builder.TestInfrastructureMachinePoolTemplateCRD.DeepCopy(),
 			builder.TestInfrastructureMachineCRD.DeepCopy(),
 			builder.TestBootstrapConfigTemplateCRD.DeepCopy(),
 			builder.TestBootstrapConfigCRD.DeepCopy(),
@@ -245,11 +294,18 @@ func newEnvironment(uncachedObjs ...client.Object) *Environment {
 	}
 
 	options := manager.Options{
-		Scheme:             scheme.Scheme,
-		MetricsBindAddress: "0",
+		Controller: config.Controller{
+			UsePriorityQueue: ptr.To[bool](feature.Gates.Enabled(feature.PriorityQueue)),
+		},
+		Scheme: scheme.Scheme,
+		Metrics: metricsserver.Options{
+			BindAddress: "0",
+		},
 		Client: client.Options{
 			Cache: &client.CacheOptions{
 				DisableFor: uncachedObjs,
+				// Use the cache for all Unstructured get/list calls.
+				Unstructured: true,
 			},
 		},
 		WebhookServer: webhook.NewServer(
@@ -259,6 +315,7 @@ func newEnvironment(uncachedObjs ...client.Object) *Environment {
 				Host:    host,
 			},
 		),
+		Cache: managerCacheOptions,
 	}
 
 	mgr, err := ctrl.NewManager(env.Config, options)
@@ -267,7 +324,7 @@ func newEnvironment(uncachedObjs ...client.Object) *Environment {
 	}
 
 	// Set minNodeStartupTimeout for Test, so it does not need to be at least 30s
-	clusterv1.SetMinNodeStartupTimeout(metav1.Duration{Duration: 1 * time.Millisecond})
+	internalwebhooks.SetMinNodeStartupTimeout(metav1.Duration{Duration: 1 * time.Millisecond})
 
 	if err := (&webhooks.Cluster{Client: mgr.GetClient()}).SetupWebhookWithManager(mgr); err != nil {
 		klog.Fatalf("unable to create webhook: %+v", err)
@@ -275,37 +332,40 @@ func newEnvironment(uncachedObjs ...client.Object) *Environment {
 	if err := (&webhooks.ClusterClass{Client: mgr.GetClient()}).SetupWebhookWithManager(mgr); err != nil {
 		klog.Fatalf("unable to create webhook: %+v", err)
 	}
-	if err := (&clusterv1.Machine{}).SetupWebhookWithManager(mgr); err != nil {
+	if err := (&webhooks.Machine{}).SetupWebhookWithManager(mgr); err != nil {
 		klog.Fatalf("unable to create webhook: %+v", err)
 	}
-	if err := (&clusterv1.MachineHealthCheck{}).SetupWebhookWithManager(mgr); err != nil {
+	if err := (&webhooks.MachineHealthCheck{}).SetupWebhookWithManager(mgr); err != nil {
 		klog.Fatalf("unable to create webhook: %+v", err)
 	}
-	if err := (&clusterv1.Machine{}).SetupWebhookWithManager(mgr); err != nil {
+	if err := (&webhooks.MachineSet{}).SetupWebhookWithManager(mgr); err != nil {
 		klog.Fatalf("unable to create webhook: %+v", err)
 	}
-	if err := (&clusterv1.MachineSet{}).SetupWebhookWithManager(mgr); err != nil {
+	if err := (&webhooks.MachineDeployment{}).SetupWebhookWithManager(mgr); err != nil {
 		klog.Fatalf("unable to create webhook: %+v", err)
 	}
-	if err := (&clusterv1.MachineDeployment{}).SetupWebhookWithManager(mgr); err != nil {
+	if err := (&webhooks.MachineDrainRule{}).SetupWebhookWithManager(mgr); err != nil {
 		klog.Fatalf("unable to create webhook: %+v", err)
 	}
-	if err := (&bootstrapv1.KubeadmConfig{}).SetupWebhookWithManager(mgr); err != nil {
+	if err := (&bootstrapwebhooks.KubeadmConfig{}).SetupWebhookWithManager(mgr); err != nil {
 		klog.Fatalf("unable to create webhook: %+v", err)
 	}
-	if err := (&bootstrapv1.KubeadmConfigTemplate{}).SetupWebhookWithManager(mgr); err != nil {
+	if err := (&bootstrapwebhooks.KubeadmConfigTemplate{}).SetupWebhookWithManager(mgr); err != nil {
 		klog.Fatalf("unable to create webhook: %+v", err)
 	}
-	if err := (&controlplanev1.KubeadmControlPlane{}).SetupWebhookWithManager(mgr); err != nil {
+	if err := (&controlplanewebhooks.KubeadmControlPlaneTemplate{}).SetupWebhookWithManager(mgr); err != nil {
 		klog.Fatalf("unable to create webhook: %+v", err)
 	}
-	if err := (&addonsv1.ClusterResourceSet{}).SetupWebhookWithManager(mgr); err != nil {
+	if err := (&controlplanewebhooks.KubeadmControlPlane{}).SetupWebhookWithManager(mgr); err != nil {
+		klog.Fatalf("unable to create webhook: %+v", err)
+	}
+	if err := (&addonswebhooks.ClusterResourceSet{}).SetupWebhookWithManager(mgr); err != nil {
 		klog.Fatalf("unable to create webhook for crs: %+v", err)
 	}
-	if err := (&addonsv1.ClusterResourceSetBinding{}).SetupWebhookWithManager(mgr); err != nil {
+	if err := (&addonswebhooks.ClusterResourceSetBinding{}).SetupWebhookWithManager(mgr); err != nil {
 		klog.Fatalf("unable to create webhook for ClusterResourceSetBinding: %+v", err)
 	}
-	if err := (&expv1.MachinePool{}).SetupWebhookWithManager(mgr); err != nil {
+	if err := (&expapiwebhooks.MachinePool{}).SetupWebhookWithManager(mgr); err != nil {
 		klog.Fatalf("unable to create webhook for machinepool: %+v", err)
 	}
 	if err := (&runtimewebhooks.ExtensionConfig{}).SetupWebhookWithManager(mgr); err != nil {
@@ -328,9 +388,6 @@ func newEnvironment(uncachedObjs ...client.Object) *Environment {
 
 // start starts the manager.
 func (e *Environment) start(ctx context.Context) {
-	ctx, cancel := context.WithCancel(ctx)
-	e.cancelManager = cancel
-
 	go func() {
 		fmt.Println("Starting the test environment manager")
 		if err := e.Manager.Start(ctx); err != nil {
@@ -344,7 +401,7 @@ func (e *Environment) start(ctx context.Context) {
 // stop stops the test environment.
 func (e *Environment) stop() error {
 	fmt.Println("Stopping the test environment")
-	e.cancelManager()
+	e.cancelManager(errors.New("test environment stopped"))
 	return e.env.Stop()
 }
 
@@ -371,7 +428,7 @@ func (e *Environment) waitForWebhooks() {
 
 // CreateKubeconfigSecret generates a new Kubeconfig secret from the envtest config.
 func (e *Environment) CreateKubeconfigSecret(ctx context.Context, cluster *clusterv1.Cluster) error {
-	return e.Create(ctx, kubeconfig.GenerateSecret(cluster, kubeconfig.FromEnvTestConfig(e.Config, cluster)))
+	return e.CreateAndWait(ctx, kubeconfig.GenerateSecret(cluster, kubeconfig.FromEnvTestConfig(e.Config, cluster)))
 }
 
 // Cleanup deletes all the given objects.
@@ -501,4 +558,42 @@ func (e *Environment) CreateNamespace(ctx context.Context, generateName string) 
 	}
 
 	return ns, nil
+}
+
+func verifyPanicMetrics() error {
+	metricFamilies, err := metrics.Registry.Gather()
+	if err != nil {
+		return err
+	}
+
+	var errs []error
+	for _, metricFamily := range metricFamilies {
+		if metricFamily.GetName() == "controller_runtime_reconcile_panics_total" {
+			for _, controllerPanicMetric := range metricFamily.Metric {
+				if controllerPanicMetric.Counter != nil && controllerPanicMetric.Counter.Value != nil && *controllerPanicMetric.Counter.Value > 0 {
+					controllerName := "unknown"
+					for _, label := range controllerPanicMetric.Label {
+						if *label.Name == "controller" {
+							controllerName = *label.Value
+						}
+					}
+					errs = append(errs, fmt.Errorf("%.0f panics occurred in %q controller (check logs for more details)", *controllerPanicMetric.Counter.Value, controllerName))
+				}
+			}
+		}
+
+		if metricFamily.GetName() == "controller_runtime_webhook_panics_total" {
+			for _, webhookPanicMetric := range metricFamily.Metric {
+				if webhookPanicMetric.Counter != nil && webhookPanicMetric.Counter.Value != nil && *webhookPanicMetric.Counter.Value > 0 {
+					errs = append(errs, fmt.Errorf("%.0f panics occurred in webhooks (check logs for more details)", *webhookPanicMetric.Counter.Value))
+				}
+			}
+		}
+	}
+
+	if len(errs) > 0 {
+		return kerrors.NewAggregate(errs)
+	}
+
+	return nil
 }

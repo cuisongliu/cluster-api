@@ -76,6 +76,11 @@ func Patch(ctx context.Context, c client.Client, fieldManager string, modified c
 		return err
 	}
 
+	gvk, err := apiutil.GVKForObject(modifiedUnstructured, c.Scheme())
+	if err != nil {
+		return errors.Wrapf(err, "failed to apply object: failed to get GroupVersionKind of modified object %s", klog.KObj(modifiedUnstructured))
+	}
+
 	var requestIdentifier string
 	if options.WithCachingProxy {
 		// Check if the request is cached.
@@ -83,18 +88,15 @@ func Patch(ctx context.Context, c client.Client, fieldManager string, modified c
 		if err != nil {
 			return errors.Wrapf(err, "failed to apply object")
 		}
-		if options.Cache.Has(requestIdentifier) {
+		if options.Cache.Has(requestIdentifier, gvk.Kind) {
 			// If the request is cached return the original object.
 			if err := c.Scheme().Convert(options.Original, modified, ctx); err != nil {
 				return errors.Wrapf(err, "failed to write original into modified object")
 			}
+			// Recover gvk e.g. for logging.
+			modified.GetObjectKind().SetGroupVersionKind(gvk)
 			return nil
 		}
-	}
-
-	gvk, err := apiutil.GVKForObject(modifiedUnstructured, c.Scheme())
-	if err != nil {
-		return errors.Wrapf(err, "failed to apply object: failed to get GroupVersionKind of modified object %s", klog.KObj(modifiedUnstructured))
 	}
 
 	patchOptions := []client.PatchOption{
@@ -109,6 +111,9 @@ func Patch(ctx context.Context, c client.Client, fieldManager string, modified c
 	if err := c.Scheme().Convert(modifiedUnstructured, modified, ctx); err != nil {
 		return errors.Wrapf(err, "failed to write modified object")
 	}
+
+	// Recover gvk e.g. for logging.
+	modified.GetObjectKind().SetGroupVersionKind(gvk)
 
 	if options.WithCachingProxy {
 		// If the SSA call did not update the object, add the request to the cache.

@@ -28,7 +28,7 @@ import (
 	. "sigs.k8s.io/controller-runtime/pkg/envtest/komega"
 
 	"sigs.k8s.io/cluster-api/internal/contract"
-	"sigs.k8s.io/cluster-api/internal/test/builder"
+	"sigs.k8s.io/cluster-api/util/test/builder"
 )
 
 func TestGetReference(t *testing.T) {
@@ -98,9 +98,8 @@ func TestGetReference(t *testing.T) {
 				Build()
 
 			r := &Reconciler{
-				Client:                    fakeClient,
-				UnstructuredCachingClient: fakeClient,
-				patchHelperFactory:        dryRunPatchHelperFactory(fakeClient),
+				Client:             fakeClient,
+				patchHelperFactory: dryRunPatchHelperFactory(fakeClient),
 			}
 			got, err := r.getReference(ctx, tt.ref)
 			if tt.wantErr {

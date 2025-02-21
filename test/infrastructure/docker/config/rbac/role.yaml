@@ -7,16 +7,30 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - configmaps
   - secrets
   verbs:
   - get
   - list
   - watch
 - apiGroups:
+  - authentication.k8s.io
+  resources:
+  - tokenreviews
+  verbs:
+  - create
+- apiGroups:
+  - authorization.k8s.io
+  resources:
+  - subjectaccessreviews
+  verbs:
+  - create
+- apiGroups:
   - cluster.x-k8s.io
   resources:
   - clusters
-  - machines
+  - machinepools
+  - machinepools/status
   - machinesets
   verbs:
   - get
@@ -25,57 +39,19 @@ rules:
 - apiGroups:
   - cluster.x-k8s.io
   resources:
-  - machinepools
-  - machinepools/status
+  - machines
   verbs:
+  - delete
   - get
   - list
   - watch
 - apiGroups:
   - infrastructure.cluster.x-k8s.io
   resources:
+  - devclusters
+  - devmachines
   - dockerclusters
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - infrastructure.cluster.x-k8s.io
-  resources:
-  - dockerclusters/finalizers
-  - dockerclusters/status
-  verbs:
-  - get
-  - patch
-  - update
-- apiGroups:
-  - infrastructure.cluster.x-k8s.io
-  resources:
   - dockermachinepools
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - infrastructure.cluster.x-k8s.io
-  resources:
-  - dockermachinepools/finalizers
-  - dockermachinepools/status
-  verbs:
-  - get
-  - patch
-  - update
-- apiGroups:
-  - infrastructure.cluster.x-k8s.io
-  resources:
   - dockermachines
   verbs:
   - create
@@ -88,6 +64,14 @@ rules:
 - apiGroups:
   - infrastructure.cluster.x-k8s.io
   resources:
+  - devclusters/finalizers
+  - devclusters/status
+  - devmachines/finalizers
+  - devmachines/status
+  - dockerclusters/finalizers
+  - dockerclusters/status
+  - dockermachinepools/finalizers
+  - dockermachinepools/status
   - dockermachines/finalizers
   - dockermachines/status
   verbs:

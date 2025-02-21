@@ -26,7 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation/field"
 
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
-	"sigs.k8s.io/cluster-api/internal/test/builder"
+	"sigs.k8s.io/cluster-api/util/test/builder"
 )
 
 type referencedObjectsCompatibilityTestCase struct {
@@ -210,7 +210,7 @@ func TestLocalObjectTemplatesAreCompatible(t *testing.T) {
 			APIVersion: "test.group.io/versiontwo",
 		},
 	}
-	incompatibleNamespaceChangeTemplate := clusterv1.LocalObjectTemplate{
+	compatibleNamespaceChangeTemplate := clusterv1.LocalObjectTemplate{
 		Ref: &corev1.ObjectReference{
 			Namespace:  "different",
 			Name:       "foo",
@@ -253,15 +253,15 @@ func TestLocalObjectTemplatesAreCompatible(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name:    "Allow change to template namespace",
+			current: template,
+			desired: compatibleNamespaceChangeTemplate,
+			wantErr: false,
+		},
+		{
 			name:    "Block change to template API Group",
 			current: template,
 			desired: incompatibleAPIGroupChangeTemplate,
-			wantErr: true,
-		},
-		{
-			name:    "Block change to template namespace",
-			current: template,
-			desired: incompatibleNamespaceChangeTemplate,
 			wantErr: true,
 		},
 		{
@@ -409,11 +409,11 @@ func TestClusterClassesAreCompatible(t *testing.T) {
 		Name:       "baz",
 		Namespace:  "default",
 	}
-	compatibleRef := &corev1.ObjectReference{
+	compatibleRefOther := &corev1.ObjectReference{
 		APIVersion: "group.test.io/another-foo",
 		Kind:       "barTemplate",
 		Name:       "another-baz",
-		Namespace:  "default",
+		Namespace:  "other",
 	}
 
 	tests := []struct {
@@ -450,7 +450,7 @@ func TestClusterClassesAreCompatible(t *testing.T) {
 		},
 
 		{
-			name: "pass for compatible clusterClasses",
+			name: "pass for compatible clusterClasses (with different namespace)",
 			current: builder.ClusterClass(metav1.NamespaceDefault, "class1").
 				WithInfrastructureClusterTemplate(
 					builder.InfrastructureClusterTemplate(metav1.NamespaceDefault, "infra1").Build()).
@@ -465,20 +465,34 @@ func TestClusterClassesAreCompatible(t *testing.T) {
 						WithBootstrapTemplate(
 							builder.BootstrapTemplate(metav1.NamespaceDefault, "bootstrap1").Build()).
 						Build()).
+				WithWorkerMachinePoolClasses(
+					*builder.MachinePoolClass("bb").
+						WithInfrastructureTemplate(
+							builder.InfrastructureMachinePoolTemplate(metav1.NamespaceDefault, "infra1").Build()).
+						WithBootstrapTemplate(
+							builder.BootstrapTemplate(metav1.NamespaceDefault, "bootstrap1").Build()).
+						Build()).
 				Build(),
-			desired: builder.ClusterClass(metav1.NamespaceDefault, "class1").
+			desired: builder.ClusterClass("other", "class1").
 				WithInfrastructureClusterTemplate(
-					builder.InfrastructureClusterTemplate(metav1.NamespaceDefault, "infra1").Build()).
+					builder.InfrastructureClusterTemplate("other", "infra1").Build()).
 				WithControlPlaneTemplate(
-					refToUnstructured(compatibleRef)).
+					refToUnstructured(compatibleRefOther)).
 				WithControlPlaneInfrastructureMachineTemplate(
-					refToUnstructured(compatibleRef)).
+					refToUnstructured(compatibleRefOther)).
 				WithWorkerMachineDeploymentClasses(
 					*builder.MachineDeploymentClass("aa").
 						WithInfrastructureTemplate(
-							builder.InfrastructureMachineTemplate(metav1.NamespaceDefault, "infra1").Build()).
+							builder.InfrastructureMachineTemplate("other", "infra1").Build()).
 						WithBootstrapTemplate(
-							builder.BootstrapTemplate(metav1.NamespaceDefault, "bootstrap1").Build()).
+							builder.BootstrapTemplate("other", "bootstrap1").Build()).
+						Build()).
+				WithWorkerMachinePoolClasses(
+					*builder.MachinePoolClass("bb").
+						WithInfrastructureTemplate(
+							builder.InfrastructureMachinePoolTemplate("other", "infra1").Build()).
+						WithBootstrapTemplate(
+							builder.BootstrapTemplate("other", "bootstrap1").Build()).
 						Build()).
 				Build(),
 			wantErr: false,
@@ -499,6 +513,13 @@ func TestClusterClassesAreCompatible(t *testing.T) {
 						WithBootstrapTemplate(
 							builder.BootstrapTemplate(metav1.NamespaceDefault, "bootstrap1").Build()).
 						Build()).
+				WithWorkerMachinePoolClasses(
+					*builder.MachinePoolClass("bb").
+						WithInfrastructureTemplate(
+							builder.InfrastructureMachinePoolTemplate(metav1.NamespaceDefault, "infra1").Build()).
+						WithBootstrapTemplate(
+							builder.BootstrapTemplate(metav1.NamespaceDefault, "bootstrap1").Build()).
+						Build()).
 				Build(),
 			desired: builder.ClusterClass(metav1.NamespaceDefault, "class1").
 				WithInfrastructureClusterTemplate(
@@ -511,6 +532,13 @@ func TestClusterClassesAreCompatible(t *testing.T) {
 					*builder.MachineDeploymentClass("aa").
 						WithInfrastructureTemplate(
 							builder.InfrastructureMachineTemplate(metav1.NamespaceDefault, "infra1").Build()).
+						WithBootstrapTemplate(
+							builder.BootstrapTemplate(metav1.NamespaceDefault, "bootstrap1").Build()).
+						Build()).
+				WithWorkerMachinePoolClasses(
+					*builder.MachinePoolClass("bb").
+						WithInfrastructureTemplate(
+							builder.InfrastructureMachinePoolTemplate(metav1.NamespaceDefault, "infra1").Build()).
 						WithBootstrapTemplate(
 							builder.BootstrapTemplate(metav1.NamespaceDefault, "bootstrap1").Build()).
 						Build()).
@@ -544,6 +572,38 @@ func TestClusterClassesAreCompatible(t *testing.T) {
 					*builder.MachineDeploymentClass("aa").
 						WithInfrastructureTemplate(
 							builder.InfrastructureMachineTemplate(metav1.NamespaceDefault, "infra1").Build()).
+						WithBootstrapTemplate(
+							refToUnstructured(incompatibleRef)).Build()).
+				Build(),
+			wantErr: false,
+		},
+		{
+			name: "pass for incompatible ref in MachinePoolClass bootstrapTemplate clusterClasses",
+			current: builder.ClusterClass(metav1.NamespaceDefault, "class1").
+				WithInfrastructureClusterTemplate(
+					builder.InfrastructureClusterTemplate(metav1.NamespaceDefault, "infra1").Build()).
+				WithControlPlaneTemplate(
+					refToUnstructured(ref)).
+				WithControlPlaneInfrastructureMachineTemplate(
+					refToUnstructured(ref)).
+				WithWorkerMachinePoolClasses(
+					*builder.MachinePoolClass("aa").
+						WithInfrastructureTemplate(
+							builder.InfrastructureMachinePoolTemplate(metav1.NamespaceDefault, "infra1").Build()).
+						WithBootstrapTemplate(
+							refToUnstructured(ref)).Build()).
+				Build(),
+			desired: builder.ClusterClass(metav1.NamespaceDefault, "class1").
+				WithInfrastructureClusterTemplate(
+					builder.InfrastructureClusterTemplate(metav1.NamespaceDefault, "infra1").Build()).
+				WithControlPlaneTemplate(
+					refToUnstructured(ref)).
+				WithControlPlaneInfrastructureMachineTemplate(
+					refToUnstructured(ref)).
+				WithWorkerMachinePoolClasses(
+					*builder.MachinePoolClass("aa").
+						WithInfrastructureTemplate(
+							builder.InfrastructureMachinePoolTemplate(metav1.NamespaceDefault, "infra1").Build()).
 						WithBootstrapTemplate(
 							refToUnstructured(incompatibleRef)).Build()).
 				Build(),
@@ -588,10 +648,49 @@ func TestClusterClassesAreCompatible(t *testing.T) {
 				Build(),
 			wantErr: false,
 		},
+		{
+			name: "pass if machinePoolClass is removed from ClusterClass",
+			current: builder.ClusterClass(metav1.NamespaceDefault, "class1").
+				WithInfrastructureClusterTemplate(
+					builder.InfrastructureClusterTemplate(metav1.NamespaceDefault, "infra1").Build()).
+				WithControlPlaneTemplate(
+					refToUnstructured(ref)).
+				WithControlPlaneInfrastructureMachineTemplate(
+					refToUnstructured(ref)).
+				WithWorkerMachinePoolClasses(
+					*builder.MachinePoolClass("aa").
+						WithInfrastructureTemplate(
+							builder.InfrastructureMachinePoolTemplate(metav1.NamespaceDefault, "infra1").Build()).
+						WithBootstrapTemplate(
+							builder.BootstrapTemplate(metav1.NamespaceDefault, "bootstrap1").Build()).
+						Build(),
+					*builder.MachinePoolClass("bb").
+						WithInfrastructureTemplate(
+							builder.InfrastructureMachinePoolTemplate(metav1.NamespaceDefault, "infra1").Build()).
+						WithBootstrapTemplate(
+							builder.BootstrapTemplate(metav1.NamespaceDefault, "bootstrap1").Build()).
+						Build()).
+				Build(),
+			desired: builder.ClusterClass(metav1.NamespaceDefault, "class1").
+				WithInfrastructureClusterTemplate(
+					builder.InfrastructureClusterTemplate(metav1.NamespaceDefault, "infra1").Build()).
+				WithControlPlaneTemplate(
+					refToUnstructured(ref)).
+				WithControlPlaneInfrastructureMachineTemplate(
+					refToUnstructured(ref)).
+				WithWorkerMachinePoolClasses(
+					*builder.MachinePoolClass("aa").
+						WithInfrastructureTemplate(
+							builder.InfrastructureMachinePoolTemplate(metav1.NamespaceDefault, "infra1").Build()).
+						WithBootstrapTemplate(
+							refToUnstructured(incompatibleRef)).Build()).
+				Build(),
+			wantErr: false,
+		},
 	}
 	for _, tt := range tests {
 		g := NewWithT(t)
-		t.Run(tt.name, func(t *testing.T) {
+		t.Run(tt.name, func(*testing.T) {
 			allErrs := ClusterClassesAreCompatible(tt.current, tt.desired)
 			if tt.wantErr {
 				g.Expect(allErrs).ToNot(BeEmpty())
@@ -748,6 +847,152 @@ func TestMachineDeploymentClassesAreCompatible(t *testing.T) {
 	}
 }
 
+func TestMachinePoolClassesAreCompatible(t *testing.T) {
+	ref := &corev1.ObjectReference{
+		APIVersion: "group.test.io/foo",
+		Kind:       "barTemplate",
+		Name:       "baz",
+		Namespace:  "default",
+	}
+	compatibleRef := &corev1.ObjectReference{
+		APIVersion: "group.test.io/another-foo",
+		Kind:       "barTemplate",
+		Name:       "another-baz",
+		Namespace:  "default",
+	}
+	incompatibleRef := &corev1.ObjectReference{
+		APIVersion: "group.test.io/foo",
+		Kind:       "another-barTemplate",
+		Name:       "baz",
+		Namespace:  "default",
+	}
+
+	tests := []struct {
+		name    string
+		current *clusterv1.ClusterClass
+		desired *clusterv1.ClusterClass
+		wantErr bool
+	}{
+		{
+			name: "pass if MachinePoolClasses are compatible",
+			current: builder.ClusterClass(metav1.NamespaceDefault, "class1").
+				WithInfrastructureClusterTemplate(
+					builder.InfrastructureClusterTemplate(metav1.NamespaceDefault, "infra1").Build()).
+				WithControlPlaneTemplate(
+					refToUnstructured(ref)).
+				WithControlPlaneInfrastructureMachineTemplate(
+					refToUnstructured(ref)).
+				WithWorkerMachinePoolClasses(
+					*builder.MachinePoolClass("aa").
+						WithInfrastructureTemplate(
+							refToUnstructured(ref)).
+						WithBootstrapTemplate(
+							refToUnstructured(ref)).
+						Build()).
+				Build(),
+			desired: builder.ClusterClass(metav1.NamespaceDefault, "class1").
+				WithInfrastructureClusterTemplate(
+					builder.InfrastructureClusterTemplate(metav1.NamespaceDefault, "infra1").Build()).
+				WithControlPlaneTemplate(
+					refToUnstructured(ref)).
+				WithControlPlaneInfrastructureMachineTemplate(
+					refToUnstructured(ref)).
+				WithWorkerMachinePoolClasses(
+					*builder.MachinePoolClass("aa").
+						WithInfrastructureTemplate(
+							refToUnstructured(compatibleRef)).
+						WithBootstrapTemplate(
+							refToUnstructured(incompatibleRef)).Build()).
+				Build(),
+			wantErr: false,
+		},
+		{
+			name: "pass if MachinePoolClass is removed from ClusterClass",
+			current: builder.ClusterClass(metav1.NamespaceDefault, "class1").
+				WithInfrastructureClusterTemplate(
+					builder.InfrastructureClusterTemplate(metav1.NamespaceDefault, "infra1").Build()).
+				WithControlPlaneTemplate(
+					refToUnstructured(ref)).
+				WithControlPlaneInfrastructureMachineTemplate(
+					refToUnstructured(ref)).
+				WithWorkerMachinePoolClasses(
+					*builder.MachinePoolClass("aa").
+						WithInfrastructureTemplate(
+							builder.InfrastructureMachinePoolTemplate(metav1.NamespaceDefault, "infra1").Build()).
+						WithBootstrapTemplate(
+							builder.BootstrapTemplate(metav1.NamespaceDefault, "bootstrap1").Build()).
+						Build(),
+					*builder.MachinePoolClass("bb").
+						WithInfrastructureTemplate(
+							builder.InfrastructureMachinePoolTemplate(metav1.NamespaceDefault, "infra1").Build()).
+						WithBootstrapTemplate(
+							builder.BootstrapTemplate(metav1.NamespaceDefault, "bootstrap1").Build()).
+						Build()).
+				Build(),
+			desired: builder.ClusterClass(metav1.NamespaceDefault, "class1").
+				WithInfrastructureClusterTemplate(
+					builder.InfrastructureClusterTemplate(metav1.NamespaceDefault, "infra1").Build()).
+				WithControlPlaneTemplate(
+					refToUnstructured(ref)).
+				WithControlPlaneInfrastructureMachineTemplate(
+					refToUnstructured(ref)).
+				WithWorkerMachinePoolClasses(
+					*builder.MachinePoolClass("aa").
+						WithInfrastructureTemplate(
+							builder.InfrastructureMachinePoolTemplate(metav1.NamespaceDefault, "infra1").Build()).
+						WithBootstrapTemplate(
+							refToUnstructured(incompatibleRef)).Build()).
+				Build(),
+			wantErr: false,
+		},
+		{
+			name: "error if MachinePoolClass has multiple incompatible references",
+			current: builder.ClusterClass(metav1.NamespaceDefault, "class1").
+				WithInfrastructureClusterTemplate(
+					builder.InfrastructureClusterTemplate(metav1.NamespaceDefault, "infra1").Build()).
+				WithControlPlaneTemplate(
+					refToUnstructured(ref)).
+				WithControlPlaneInfrastructureMachineTemplate(
+					refToUnstructured(ref)).
+				WithWorkerMachinePoolClasses(
+					*builder.MachinePoolClass("aa").
+						WithInfrastructureTemplate(
+							refToUnstructured(ref)).
+						WithBootstrapTemplate(
+							refToUnstructured(ref)).
+						Build(),
+				).
+				Build(),
+			desired: builder.ClusterClass(metav1.NamespaceDefault, "class1").
+				WithInfrastructureClusterTemplate(
+					builder.InfrastructureClusterTemplate(metav1.NamespaceDefault, "infra1").Build()).
+				WithControlPlaneTemplate(
+					refToUnstructured(incompatibleRef)).
+				WithControlPlaneInfrastructureMachineTemplate(
+					refToUnstructured(incompatibleRef)).
+				WithWorkerMachinePoolClasses(
+					*builder.MachinePoolClass("aa").
+						WithInfrastructureTemplate(
+							refToUnstructured(incompatibleRef)).
+						WithBootstrapTemplate(
+							refToUnstructured(compatibleRef)).Build()).
+				Build(),
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := NewWithT(t)
+			allErrs := MachinePoolClassesAreCompatible(tt.current, tt.desired)
+			if tt.wantErr {
+				g.Expect(allErrs).ToNot(BeEmpty())
+				return
+			}
+			g.Expect(allErrs).To(BeEmpty())
+		})
+	}
+}
+
 func TestMachineDeploymentClassesAreUnique(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -847,6 +1092,114 @@ func TestMachineDeploymentClassesAreUnique(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			g := NewWithT(t)
 			allErrs := MachineDeploymentClassesAreUnique(tt.clusterClass)
+			if tt.wantErr {
+				g.Expect(allErrs).ToNot(BeEmpty())
+				return
+			}
+			g.Expect(allErrs).To(BeEmpty())
+		})
+	}
+}
+
+func TestMachinePoolClassesAreUnique(t *testing.T) {
+	tests := []struct {
+		name         string
+		clusterClass *clusterv1.ClusterClass
+		wantErr      bool
+	}{
+		{
+			name: "pass if MachinePoolClasses are unique",
+			clusterClass: builder.ClusterClass(metav1.NamespaceDefault, "class1").
+				WithInfrastructureClusterTemplate(
+					builder.InfrastructureClusterTemplate(metav1.NamespaceDefault, "infra1").Build()).
+				WithControlPlaneTemplate(
+					builder.ControlPlane(metav1.NamespaceDefault, "cp1").Build()).
+				WithControlPlaneInfrastructureMachineTemplate(
+					builder.InfrastructureMachinePoolTemplate(metav1.NamespaceDefault, "cpinfra1").Build()).
+				WithWorkerMachinePoolClasses(
+					*builder.MachinePoolClass("aa").
+						WithInfrastructureTemplate(
+							builder.InfrastructureMachinePoolTemplate(metav1.NamespaceDefault, "infra1").Build()).
+						WithBootstrapTemplate(
+							builder.BootstrapTemplate(metav1.NamespaceDefault, "bootstrap1").Build()).
+						Build(),
+					*builder.MachinePoolClass("bb").
+						WithInfrastructureTemplate(
+							builder.InfrastructureMachinePoolTemplate(metav1.NamespaceDefault, "infra1").Build()).
+						WithBootstrapTemplate(
+							builder.BootstrapTemplate(metav1.NamespaceDefault, "bootstrap1").Build()).
+						Build()).
+				Build(),
+			wantErr: false,
+		},
+		{
+			name: "fail if MachinePoolClasses are duplicated",
+			clusterClass: builder.ClusterClass(metav1.NamespaceDefault, "class1").
+				WithInfrastructureClusterTemplate(
+					builder.InfrastructureClusterTemplate(metav1.NamespaceDefault, "infra1").Build()).
+				WithControlPlaneTemplate(
+					builder.ControlPlane(metav1.NamespaceDefault, "cp1").Build()).
+				WithControlPlaneInfrastructureMachineTemplate(
+					builder.InfrastructureMachinePoolTemplate(metav1.NamespaceDefault, "cpinfra1").Build()).
+				WithWorkerMachinePoolClasses(
+					*builder.MachinePoolClass("aa").
+						WithInfrastructureTemplate(
+							builder.InfrastructureMachinePoolTemplate(metav1.NamespaceDefault, "infra1").Build()).
+						WithBootstrapTemplate(
+							builder.BootstrapTemplate(metav1.NamespaceDefault, "bootstrap1").Build()).
+						Build(),
+					*builder.MachinePoolClass("aa").
+						WithInfrastructureTemplate(
+							builder.InfrastructureMachinePoolTemplate(metav1.NamespaceDefault, "infra1").Build()).
+						WithBootstrapTemplate(
+							builder.BootstrapTemplate(metav1.NamespaceDefault, "bootstrap1").Build()).
+						Build()).
+				Build(),
+			wantErr: true,
+		},
+		{
+			name: "fail if multiple MachinePoolClasses are identical",
+			clusterClass: builder.ClusterClass(metav1.NamespaceDefault, "class1").
+				WithInfrastructureClusterTemplate(
+					builder.InfrastructureClusterTemplate(metav1.NamespaceDefault, "infra1").Build()).
+				WithControlPlaneTemplate(
+					builder.ControlPlane(metav1.NamespaceDefault, "cp1").Build()).
+				WithControlPlaneInfrastructureMachineTemplate(
+					builder.InfrastructureMachinePoolTemplate(metav1.NamespaceDefault, "cpinfra1").Build()).
+				WithWorkerMachinePoolClasses(
+					*builder.MachinePoolClass("aa").
+						WithInfrastructureTemplate(
+							builder.InfrastructureMachinePoolTemplate(metav1.NamespaceDefault, "infra1").Build()).
+						WithBootstrapTemplate(
+							builder.BootstrapTemplate(metav1.NamespaceDefault, "bootstrap1").Build()).
+						Build(),
+					*builder.MachinePoolClass("aa").
+						WithInfrastructureTemplate(
+							builder.InfrastructureMachinePoolTemplate(metav1.NamespaceDefault, "infra1").Build()).
+						WithBootstrapTemplate(
+							builder.BootstrapTemplate(metav1.NamespaceDefault, "bootstrap1").Build()).
+						Build(),
+					*builder.MachinePoolClass("aa").
+						WithInfrastructureTemplate(
+							builder.InfrastructureMachinePoolTemplate(metav1.NamespaceDefault, "infra1").Build()).
+						WithBootstrapTemplate(
+							builder.BootstrapTemplate(metav1.NamespaceDefault, "bootstrap1").Build()).
+						Build(),
+					*builder.MachinePoolClass("aa").
+						WithInfrastructureTemplate(
+							builder.InfrastructureMachinePoolTemplate(metav1.NamespaceDefault, "infra1").Build()).
+						WithBootstrapTemplate(
+							builder.BootstrapTemplate(metav1.NamespaceDefault, "bootstrap1").Build()).
+						Build(),
+				).
+				Build(),
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := NewWithT(t)
+			allErrs := MachinePoolClassesAreUnique(tt.clusterClass)
 			if tt.wantErr {
 				g.Expect(allErrs).ToNot(BeEmpty())
 				return
@@ -1063,6 +1416,213 @@ func TestMachineDeploymentTopologiesAreUniqueAndDefinedInClusterClass(t *testing
 	}
 }
 
+func TestMachinePoolTopologiesAreUniqueAndDefinedInClusterClass(t *testing.T) {
+	tests := []struct {
+		name         string
+		clusterClass *clusterv1.ClusterClass
+		cluster      *clusterv1.Cluster
+		wantErr      bool
+	}{
+		{
+			name: "fail if MachinePoolTopologies name is empty",
+			clusterClass: builder.ClusterClass(metav1.NamespaceDefault, "class1").
+				WithInfrastructureClusterTemplate(
+					builder.InfrastructureClusterTemplate(metav1.NamespaceDefault, "infra1").Build()).
+				WithControlPlaneTemplate(
+					builder.ControlPlane(metav1.NamespaceDefault, "cp1").Build()).
+				WithWorkerMachinePoolClasses(
+					*builder.MachinePoolClass("aa").
+						WithInfrastructureTemplate(
+							builder.InfrastructureMachinePoolTemplate(metav1.NamespaceDefault, "infra1").Build()).
+						WithBootstrapTemplate(
+							builder.BootstrapTemplate(metav1.NamespaceDefault, "bootstrap1").Build()).
+						Build()).
+				Build(),
+			cluster: builder.Cluster("fooboo", "cluster1").
+				WithTopology(builder.ClusterTopology().
+					WithClass("foo").
+					WithVersion("v1.19.1").
+					WithMachinePool(
+						// The name should not be empty.
+						builder.MachinePoolTopology("").
+							WithClass("aa").
+							Build()).
+					Build()).
+				Build(),
+			wantErr: true,
+		},
+		{
+			name: "pass if MachinePoolTopologies are unique and defined in ClusterClass",
+			clusterClass: builder.ClusterClass(metav1.NamespaceDefault, "class1").
+				WithInfrastructureClusterTemplate(
+					builder.InfrastructureClusterTemplate(metav1.NamespaceDefault, "infra1").Build()).
+				WithControlPlaneTemplate(
+					builder.ControlPlane(metav1.NamespaceDefault, "cp1").Build()).
+				WithControlPlaneInfrastructureMachineTemplate(
+					builder.InfrastructureMachinePoolTemplate(metav1.NamespaceDefault, "cpinfra1").Build()).
+				WithWorkerMachinePoolClasses(
+					*builder.MachinePoolClass("aa").
+						WithInfrastructureTemplate(
+							builder.InfrastructureMachinePoolTemplate(metav1.NamespaceDefault, "infra1").Build()).
+						WithBootstrapTemplate(
+							builder.BootstrapTemplate(metav1.NamespaceDefault, "bootstrap1").Build()).
+						Build()).
+				Build(),
+			cluster: builder.Cluster(metav1.NamespaceDefault, "cluster1").
+				WithTopology(
+					builder.ClusterTopology().
+						WithClass("class1").
+						WithVersion("v1.22.2").
+						WithMachinePool(
+							builder.MachinePoolTopology("workers1").
+								WithClass("aa").
+								Build()).
+						Build()).
+				Build(),
+			wantErr: false,
+		},
+		{
+			name: "fail if MachinePoolTopologies are unique but not defined in ClusterClass",
+			clusterClass: builder.ClusterClass(metav1.NamespaceDefault, "class1").
+				WithInfrastructureClusterTemplate(
+					builder.InfrastructureClusterTemplate(metav1.NamespaceDefault, "infra1").Build()).
+				WithControlPlaneTemplate(
+					builder.ControlPlane(metav1.NamespaceDefault, "cp1").Build()).
+				WithControlPlaneInfrastructureMachineTemplate(
+					builder.InfrastructureMachinePoolTemplate(metav1.NamespaceDefault, "cpinfra1").Build()).
+				WithWorkerMachinePoolClasses(
+					*builder.MachinePoolClass("aa").
+						WithInfrastructureTemplate(
+							builder.InfrastructureMachinePoolTemplate(metav1.NamespaceDefault, "infra1").Build()).
+						WithBootstrapTemplate(
+							builder.BootstrapTemplate(metav1.NamespaceDefault, "bootstrap1").Build()).
+						Build()).
+				Build(),
+			cluster: builder.Cluster(metav1.NamespaceDefault, "cluster1").
+				WithTopology(
+					builder.ClusterTopology().
+						WithClass("class1").
+						WithVersion("v1.22.2").
+						WithMachinePool(
+							builder.MachinePoolTopology("workers1").
+								WithClass("bb").
+								Build()).
+						Build()).
+				Build(),
+			wantErr: true,
+		},
+		{
+			name: "fail if MachinePoolTopologies are not unique but is defined in ClusterClass",
+			clusterClass: builder.ClusterClass(metav1.NamespaceDefault, "class1").
+				WithInfrastructureClusterTemplate(
+					builder.InfrastructureClusterTemplate(metav1.NamespaceDefault, "infra1").Build()).
+				WithControlPlaneTemplate(
+					builder.ControlPlane(metav1.NamespaceDefault, "cp1").Build()).
+				WithControlPlaneInfrastructureMachineTemplate(
+					builder.InfrastructureMachinePoolTemplate(metav1.NamespaceDefault, "cpinfra1").Build()).
+				WithWorkerMachinePoolClasses(
+					*builder.MachinePoolClass("aa").
+						WithInfrastructureTemplate(
+							builder.InfrastructureMachinePoolTemplate(metav1.NamespaceDefault, "infra1").Build()).
+						WithBootstrapTemplate(
+							builder.BootstrapTemplate(metav1.NamespaceDefault, "bootstrap1").Build()).
+						Build()).
+				Build(),
+			cluster: builder.Cluster(metav1.NamespaceDefault, "cluster1").
+				WithTopology(
+					builder.ClusterTopology().
+						WithClass("class1").
+						WithVersion("v1.22.2").
+						WithMachinePool(
+							builder.MachinePoolTopology("workers1").
+								WithClass("aa").
+								Build()).
+						WithMachinePool(
+							builder.MachinePoolTopology("workers1").
+								WithClass("aa").
+								Build()).
+						Build()).
+				Build(),
+			wantErr: true,
+		},
+		{
+			name: "pass if MachinePoolTopologies are unique and share a class that is defined in ClusterClass",
+			clusterClass: builder.ClusterClass(metav1.NamespaceDefault, "class1").
+				WithInfrastructureClusterTemplate(
+					builder.InfrastructureClusterTemplate(metav1.NamespaceDefault, "infra1").Build()).
+				WithControlPlaneTemplate(
+					builder.ControlPlane(metav1.NamespaceDefault, "cp1").Build()).
+				WithControlPlaneInfrastructureMachineTemplate(
+					builder.InfrastructureMachinePoolTemplate(metav1.NamespaceDefault, "cpinfra1").Build()).
+				WithWorkerMachinePoolClasses(
+					*builder.MachinePoolClass("aa").
+						WithInfrastructureTemplate(
+							builder.InfrastructureMachinePoolTemplate(metav1.NamespaceDefault, "infra1").Build()).
+						WithBootstrapTemplate(
+							builder.BootstrapTemplate(metav1.NamespaceDefault, "bootstrap1").Build()).
+						Build()).
+				Build(),
+			cluster: builder.Cluster(metav1.NamespaceDefault, "cluster1").
+				WithTopology(
+					builder.ClusterTopology().
+						WithClass("class1").
+						WithVersion("v1.22.2").
+						WithMachinePool(
+							builder.MachinePoolTopology("workers1").
+								WithClass("aa").
+								Build()).
+						WithMachinePool(
+							builder.MachinePoolTopology("workers2").
+								WithClass("aa").
+								Build()).
+						Build()).
+				Build(),
+			wantErr: false,
+		},
+		{
+			name: "fail if MachinePoolTopology name is longer than 63 characters",
+			clusterClass: builder.ClusterClass(metav1.NamespaceDefault, "class1").
+				WithInfrastructureClusterTemplate(
+					builder.InfrastructureClusterTemplate(metav1.NamespaceDefault, "infra1").Build()).
+				WithControlPlaneTemplate(
+					builder.ControlPlane(metav1.NamespaceDefault, "cp1").Build()).
+				WithControlPlaneInfrastructureMachineTemplate(
+					builder.InfrastructureMachinePoolTemplate(metav1.NamespaceDefault, "cpinfra1").Build()).
+				WithWorkerMachinePoolClasses(
+					*builder.MachinePoolClass("aa").
+						WithInfrastructureTemplate(
+							builder.InfrastructureMachinePoolTemplate(metav1.NamespaceDefault, "infra1").Build()).
+						WithBootstrapTemplate(
+							builder.BootstrapTemplate(metav1.NamespaceDefault, "bootstrap1").Build()).
+						Build()).
+				Build(),
+			cluster: builder.Cluster(metav1.NamespaceDefault, "cluster1").
+				WithTopology(
+					builder.ClusterTopology().
+						WithClass("class1").
+						WithVersion("v1.22.2").
+						WithMachinePool(
+							builder.MachinePoolTopology("machine-pool-topology-name-that-has-longerthan63characterlooooooooooooooooooooooongname").
+								WithClass("aa").
+								Build()).
+						Build()).
+				Build(),
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := NewWithT(t)
+			allErrs := MachinePoolTopologiesAreValidAndDefinedInClusterClass(tt.cluster, tt.clusterClass)
+			if tt.wantErr {
+				g.Expect(allErrs).ToNot(BeEmpty())
+				return
+			}
+			g.Expect(allErrs).To(BeEmpty())
+		})
+	}
+}
+
 func TestClusterClassReferencesAreValid(t *testing.T) {
 	ref := &corev1.ObjectReference{
 		APIVersion: "group.test.io/foo",
@@ -1098,11 +1658,18 @@ func TestClusterClassReferencesAreValid(t *testing.T) {
 						WithBootstrapTemplate(
 							refToUnstructured(ref)).
 						Build()).
+				WithWorkerMachinePoolClasses(
+					*builder.MachinePoolClass("aa").
+						WithInfrastructureTemplate(
+							refToUnstructured(ref)).
+						WithBootstrapTemplate(
+							refToUnstructured(ref)).
+						Build()).
 				Build(),
 			wantErr: false,
 		},
 		{
-			name: "error if clusterClass has multiple invalid refs",
+			name: "error if clusterClass has multiple invalid md refs",
 			clusterClass: builder.ClusterClass(metav1.NamespaceDefault, "class1").
 				WithInfrastructureClusterTemplate(
 					refToUnstructured(invalidRef)).
@@ -1132,7 +1699,37 @@ func TestClusterClassReferencesAreValid(t *testing.T) {
 				Build(),
 			wantErr: true,
 		},
-
+		{
+			name: "error if clusterClass has multiple invalid mp refs",
+			clusterClass: builder.ClusterClass(metav1.NamespaceDefault, "class1").
+				WithInfrastructureClusterTemplate(
+					refToUnstructured(invalidRef)).
+				WithControlPlaneTemplate(
+					refToUnstructured(invalidRef)).
+				WithControlPlaneInfrastructureMachineTemplate(
+					refToUnstructured(invalidRef)).
+				WithWorkerMachinePoolClasses(
+					*builder.MachinePoolClass("a").
+						WithInfrastructureTemplate(
+							refToUnstructured(invalidRef)).
+						WithBootstrapTemplate(
+							refToUnstructured(invalidRef)).
+						Build(),
+					*builder.MachinePoolClass("b").
+						WithInfrastructureTemplate(
+							refToUnstructured(invalidRef)).
+						WithBootstrapTemplate(
+							refToUnstructured(invalidRef)).
+						Build(),
+					*builder.MachinePoolClass("c").
+						WithInfrastructureTemplate(
+							refToUnstructured(invalidRef)).
+						WithBootstrapTemplate(
+							refToUnstructured(invalidRef)).
+						Build()).
+				Build(),
+			wantErr: true,
+		},
 		{
 			name: "error if clusterClass has invalid ControlPlane ref",
 			clusterClass: builder.ClusterClass(metav1.NamespaceDefault, "class1").
@@ -1144,6 +1741,13 @@ func TestClusterClassReferencesAreValid(t *testing.T) {
 					refToUnstructured(ref)).
 				WithWorkerMachineDeploymentClasses(
 					*builder.MachineDeploymentClass("aa").
+						WithInfrastructureTemplate(
+							refToUnstructured(ref)).
+						WithBootstrapTemplate(
+							refToUnstructured(ref)).
+						Build()).
+				WithWorkerMachinePoolClasses(
+					*builder.MachinePoolClass("aa").
 						WithInfrastructureTemplate(
 							refToUnstructured(ref)).
 						WithBootstrapTemplate(

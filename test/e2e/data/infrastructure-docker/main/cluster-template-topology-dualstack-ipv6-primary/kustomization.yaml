@@ -1,6 +1,6 @@
-bases:
-  - ../bases/cluster-with-topology.yaml
-  - ../bases/crs.yaml
+resources:
+- ../bases/cluster-with-topology.yaml
+- ../bases/crs.yaml
 
 patches:
-  - cluster.yaml
+- path: cluster.yaml
