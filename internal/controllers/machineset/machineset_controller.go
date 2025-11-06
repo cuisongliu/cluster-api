@@ -34,7 +34,6 @@ import (
 	kerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
@@ -52,9 +51,10 @@ import (
 	"sigs.k8s.io/cluster-api/controllers/noderefutil"
 	"sigs.k8s.io/cluster-api/internal/contract"
 	"sigs.k8s.io/cluster-api/internal/controllers/machine"
-	"sigs.k8s.io/cluster-api/internal/controllers/machinedeployment/mdutil"
 	"sigs.k8s.io/cluster-api/internal/hooks"
 	topologynames "sigs.k8s.io/cluster-api/internal/topology/names"
+	clientutil "sigs.k8s.io/cluster-api/internal/util/client"
+	"sigs.k8s.io/cluster-api/internal/util/inplace"
 	"sigs.k8s.io/cluster-api/internal/util/ssa"
 	"sigs.k8s.io/cluster-api/util"
 	"sigs.k8s.io/cluster-api/util/annotations"
@@ -72,13 +72,6 @@ import (
 var (
 	// machineSetKind contains the schema.GroupVersionKind for the MachineSet type.
 	machineSetKind = clusterv1.GroupVersion.WithKind("MachineSet")
-
-	// stateConfirmationTimeout is the amount of time allowed to wait for desired state.
-	stateConfirmationTimeout = 10 * time.Second
-
-	// stateConfirmationInterval is the amount of time between polling for the desired state.
-	// The polling is against a local memory cache.
-	stateConfirmationInterval = 100 * time.Millisecond
 )
 
 const (
@@ -421,7 +414,7 @@ func (r *Reconciler) triggerInPlaceUpdate(ctx context.Context, s *scope) (ctrl.R
 
 	// Wait until the cache observed the Machine with PendingHooksAnnotation to ensure subsequent reconciles
 	// will observe it as well and won't repeatedly call the logic to trigger in-place update.
-	if err := r.waitForMachinesInPlaceUpdateStarted(ctx, machinesTriggeredInPlace); err != nil {
+	if err := clientutil.WaitForCacheToBeUpToDate(ctx, r.Client, "starting in-place updates", machinesTriggeredInPlace...); err != nil {
 		errs = append(errs, err)
 	}
 	if len(errs) > 0 {
@@ -662,8 +655,6 @@ func (r *Reconciler) syncMachines(ctx context.Context, s *scope) (ctrl.Result, e
 	for i := range machines {
 		m := machines[i]
 
-		upToDateCondition := newMachineUpToDateCondition(s)
-
 		// If the machine is already being deleted, we only need to sync
 		// the subset of fields that impact tearing down a machine
 		if !m.DeletionTimestamp.IsZero() {
@@ -679,29 +670,10 @@ func (r *Reconciler) syncMachines(ctx context.Context, s *scope) (ctrl.Result, e
 			m.Spec.Deletion.NodeVolumeDetachTimeoutSeconds = machineSet.Spec.Template.Spec.Deletion.NodeVolumeDetachTimeoutSeconds
 			m.Spec.MinReadySeconds = machineSet.Spec.Template.Spec.MinReadySeconds
 
-			// Set machine's up to date condition
-			if upToDateCondition != nil {
-				conditions.Set(m, *upToDateCondition)
-			}
-
-			if err := patchHelper.Patch(ctx, m, patch.WithOwnedConditions{Conditions: []string{clusterv1.MachineUpToDateCondition}}); err != nil {
+			if err := patchHelper.Patch(ctx, m); err != nil {
 				return ctrl.Result{}, err
 			}
 			continue
-		}
-
-		// Patch the machine's up-to-date condition.
-		// Note: for the time being we continue to rely on the patch helper for setting conditions; In the future, if
-		// we will improve patch helper to support SSA, we can revisit this code and perform both this change and the others in place mutations in a single operation.
-		if upToDateCondition != nil {
-			patchHelper, err := patch.NewHelper(m, r.Client)
-			if err != nil {
-				return ctrl.Result{}, err
-			}
-			conditions.Set(m, *upToDateCondition)
-			if err := patchHelper.Patch(ctx, m, patch.WithOwnedConditions{Conditions: []string{clusterv1.MachineUpToDateCondition}}); err != nil {
-				return ctrl.Result{}, err
-			}
 		}
 
 		// Update Machine to propagate in-place mutable fields from the MachineSet.
@@ -757,61 +729,6 @@ func (r *Reconciler) syncMachines(ctx context.Context, s *scope) (ctrl.Result, e
 		}
 	}
 	return ctrl.Result{}, nil
-}
-
-func newMachineUpToDateCondition(s *scope) *metav1.Condition {
-	// If the current MachineSet is a stand-alone MachineSet, the MachineSet controller does not set an up-to-date condition
-	// on Machines, allowing tools managing higher level abstractions to set this condition.
-	// This is also consistent with the fact that the MachineSet controller primarily takes care of the number of Machine
-	// replicas, it doesn't reconcile them (even if we have a few exceptions like in-place propagation of a few selected
-	// fields and remediation).
-	if s.owningMachineDeployment == nil {
-		return nil
-	}
-
-	// Determine current and desired state.
-	// If the current MachineSet is owned by a MachineDeployment, we mirror what is implemented in the MachineDeployment controller
-	// to trigger rollouts (by creating new MachineSets).
-	// More specifically:
-	// - desired state for the Machine is the spec.Template of the MachineDeployment
-	// - current state for the Machine is the spec.Template of the MachineSet who owns the Machine
-	// Note: We are intentionally considering current spec from the MachineSet instead of spec from the Machine itself in
-	// order to surface info consistent with what the MachineDeployment controller uses to take decisions about rollouts.
-	// The downside is that the system will ignore out of band changes applied to controlled Machines, which is
-	// considered an acceptable trade-off given that out of band changes are the exception (users should not change
-	// objects owned by the system).
-	// However, if out of band changes happen, at least the system will ignore out of band changes consistently, both in the
-	// MachineDeployment controller and in the condition computed here.
-	current := &s.machineSet.Spec.Template
-	desired := &s.owningMachineDeployment.Spec.Template
-
-	upToDate, notUpToDateResult := mdutil.MachineTemplateUpToDate(current, desired)
-
-	if !s.owningMachineDeployment.Spec.Rollout.After.IsZero() {
-		if s.owningMachineDeployment.Spec.Rollout.After.Time.Before(s.reconciliationTime) && !s.machineSet.CreationTimestamp.After(s.owningMachineDeployment.Spec.Rollout.After.Time) {
-			upToDate = false
-			notUpToDateResult.ConditionMessages = append(notUpToDateResult.ConditionMessages, "MachineDeployment spec.rolloutAfter expired")
-		}
-	}
-
-	if !upToDate {
-		for i := range notUpToDateResult.ConditionMessages {
-			notUpToDateResult.ConditionMessages[i] = fmt.Sprintf("* %s", notUpToDateResult.ConditionMessages[i])
-		}
-		return &metav1.Condition{
-			Type:   clusterv1.MachineUpToDateCondition,
-			Status: metav1.ConditionFalse,
-			Reason: clusterv1.MachineNotUpToDateReason,
-			// Note: the code computing the message for MachineDeployment's RolloutOut condition is making assumptions on the format/content of this message.
-			Message: strings.Join(notUpToDateResult.ConditionMessages, "\n"),
-		}
-	}
-
-	return &metav1.Condition{
-		Type:   clusterv1.MachineUpToDateCondition,
-		Status: metav1.ConditionTrue,
-		Reason: clusterv1.MachineUpToDateReason,
-	}
 }
 
 // syncReplicas scales Machine resources up or down.
@@ -976,7 +893,7 @@ func (r *Reconciler) createMachines(ctx context.Context, s *scope, machinesToAdd
 	}
 
 	// Wait for cache update to ensure following reconcile gets latest change.
-	return ctrl.Result{}, r.waitForMachinesCreation(ctx, machinesAdded)
+	return ctrl.Result{}, clientutil.WaitForCacheToBeUpToDate(ctx, r.Client, "Machine creation", machinesAdded...)
 }
 
 func (r *Reconciler) deleteMachines(ctx context.Context, s *scope, machinesToDelete int) (ctrl.Result, error) {
@@ -1024,7 +941,7 @@ func (r *Reconciler) deleteMachines(ctx context.Context, s *scope, machinesToDel
 	}
 
 	// Wait for cache update to ensure following reconcile gets latest change.
-	if err := r.waitForMachinesDeletion(ctx, machinesDeleted); err != nil {
+	if err := clientutil.WaitForObjectsToBeDeletedFromTheCache(ctx, r.Client, "Machine deletion", machinesDeleted...); err != nil {
 		errs = append(errs, err)
 	}
 	if len(errs) > 0 {
@@ -1076,7 +993,7 @@ func (r *Reconciler) startMoveMachines(ctx context.Context, s *scope, targetMSNa
 		log := log.WithValues("Machine", klog.KObj(machine))
 
 		// Make sure we are not moving machines still updating in place from a previous move (this includes also machines still pending AcknowledgeMove).
-		if _, ok := machine.Annotations[clusterv1.UpdateInProgressAnnotation]; ok || hooks.IsPending(runtimehooksv1.UpdateMachine, machine) {
+		if inplace.IsUpdateInProgress(machine) {
 			continue
 		}
 
@@ -1137,7 +1054,7 @@ func (r *Reconciler) startMoveMachines(ctx context.Context, s *scope, targetMSNa
 	}
 
 	// Wait for cache update to ensure following reconcile gets latest change.
-	if err := r.waitForMachinesStartedMove(ctx, machinesMoved); err != nil {
+	if err := clientutil.WaitForCacheToBeUpToDate(ctx, r.Client, "moving Machines", machinesMoved...); err != nil {
 		errs = append(errs, err)
 	}
 	if len(errs) > 0 {
@@ -1316,92 +1233,6 @@ func (r *Reconciler) adoptOrphan(ctx context.Context, machineSet *clusterv1.Mach
 	newRef := *metav1.NewControllerRef(machineSet, machineSetKind)
 	machine.SetOwnerReferences(util.EnsureOwnerRef(machine.GetOwnerReferences(), newRef))
 	return r.Client.Patch(ctx, machine, patch)
-}
-
-func (r *Reconciler) waitForMachinesCreation(ctx context.Context, machines []*clusterv1.Machine) error {
-	pollErr := wait.PollUntilContextTimeout(ctx, stateConfirmationInterval, stateConfirmationTimeout, true, func(ctx context.Context) (bool, error) {
-		for _, machine := range machines {
-			key := client.ObjectKey{Namespace: machine.Namespace, Name: machine.Name}
-			if err := r.Client.Get(ctx, key, &clusterv1.Machine{}); err != nil {
-				if apierrors.IsNotFound(err) {
-					return false, nil
-				}
-				return false, err
-			}
-		}
-		return true, nil
-	})
-
-	if pollErr != nil {
-		return errors.Wrap(pollErr, "failed waiting for Machines to be created")
-	}
-	return nil
-}
-
-func (r *Reconciler) waitForMachinesDeletion(ctx context.Context, machines []*clusterv1.Machine) error {
-	pollErr := wait.PollUntilContextTimeout(ctx, stateConfirmationInterval, stateConfirmationTimeout, true, func(ctx context.Context) (bool, error) {
-		for _, machine := range machines {
-			m := &clusterv1.Machine{}
-			key := client.ObjectKey{Namespace: machine.Namespace, Name: machine.Name}
-			if err := r.Client.Get(ctx, key, m); err != nil {
-				if apierrors.IsNotFound(err) {
-					continue
-				}
-				return false, err
-			}
-			if m.DeletionTimestamp.IsZero() {
-				return false, nil
-			}
-		}
-		return true, nil
-	})
-
-	if pollErr != nil {
-		return errors.Wrap(pollErr, "failed waiting for Machines to be deleted")
-	}
-	return nil
-}
-
-func (r *Reconciler) waitForMachinesStartedMove(ctx context.Context, machines []*clusterv1.Machine) error {
-	pollErr := wait.PollUntilContextTimeout(ctx, stateConfirmationInterval, stateConfirmationTimeout, true, func(ctx context.Context) (bool, error) {
-		for _, machine := range machines {
-			m := &clusterv1.Machine{}
-			key := client.ObjectKey{Namespace: machine.Namespace, Name: machine.Name}
-			if err := r.Client.Get(ctx, key, m); err != nil {
-				return false, err
-			}
-			if _, annotationSet := m.Annotations[clusterv1.UpdateInProgressAnnotation]; !annotationSet {
-				return false, nil
-			}
-		}
-		return true, nil
-	})
-
-	if pollErr != nil {
-		return errors.Wrap(pollErr, "failed waiting for Machines to start move")
-	}
-	return nil
-}
-
-func (r *Reconciler) waitForMachinesInPlaceUpdateStarted(ctx context.Context, machines []*clusterv1.Machine) error {
-	pollErr := wait.PollUntilContextTimeout(ctx, stateConfirmationInterval, stateConfirmationTimeout, true, func(ctx context.Context) (bool, error) {
-		for _, machine := range machines {
-			m := &clusterv1.Machine{}
-			key := client.ObjectKey{Namespace: machine.Namespace, Name: machine.Name}
-			if err := r.Client.Get(ctx, key, m); err != nil {
-				return false, err
-			}
-			if !hooks.IsPending(runtimehooksv1.UpdateMachine, m) {
-				return false, nil
-			}
-		}
-		return true, nil
-	})
-
-	if pollErr != nil {
-		return errors.Wrap(pollErr, "failed waiting for Machines to complete move")
-	}
-	return nil
 }
 
 // MachineToMachineSets is a handler.ToRequestsFunc to be used to enqueue requests for reconciliation
